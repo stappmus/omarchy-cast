@@ -9,7 +9,7 @@ python -c 'import pychromecast' || { echo 'Install: omarchy pkg add python-pychr
 omarchy plugin validate "$source_dir"
 mkdir -p "$target" "$HOME/.local/bin" "$HOME/.local/share/applications" "$HOME/.local/share/icons/hicolor/scalable/apps"
 if [[ "$source_dir" != "$target" ]]; then
-  for file in manifest.json CastPanel.qml backend.py streaming.py compatibility.py omarchy-cast install.sh uninstall.sh README.md LICENSE icon.svg setup-network.sh; do
+  for file in manifest.json CastPanel.qml DelaySlider.qml backend.py streaming.py compatibility.py omarchy-cast install.sh uninstall.sh README.md LICENSE icon.svg setup-network.sh; do
     install -m 644 "$source_dir/$file" "$target/$file"
   done
   chmod +x "$target/omarchy-cast" "$target/install.sh" "$target/uninstall.sh"

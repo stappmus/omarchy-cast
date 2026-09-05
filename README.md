@@ -51,7 +51,16 @@ can leave a session directory there.
 
 Drop or select a video, select a TV, optionally select subtitles, and press
 **Play on your TV**. Audio tracks, sound output, an audio-delay slider (−1 s to +1 s in 50 ms steps), quality limits, and a manual TV
-address are under **Options**. Changes apply when restarting the video.
+address are under **Options**. Drag the audio-delay handle left to advance sound,
+right to delay it. Releasing the handle applies automatically to the current
+movie with a brief rebuffer, preserving its position and paused/playing state.
+Scrolling over the handle never changes the setting. Other options apply when
+restarting the video.
+
+Audio adjustment uses FFmpeg sample trimming for earlier sound and silence
+insertion for later sound, instead of offsetting timestamps alone
+([FFmpeg filter documentation](https://ffmpeg.org/ffmpeg-filters.html#atrim)).
+The automatic reload and audible sync still need verification on the TV.
 URLs must point to media, not web pages or DRM content. Image subtitles require
 an external text subtitle file. Closing the panel keeps playback running.
 

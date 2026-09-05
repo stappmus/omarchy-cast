@@ -80,7 +80,7 @@ Panel {
     function send(command) {
         if (!ready) { message = "Cast worker is not running. Exit and reopen Omarchy Cast."; failed = true; return }
         command.id = ++commandSequence
-        var controls = ["pause", "seek", "volume", "mute", "subtitles", "stop"]
+        var controls = ["pause", "seek", "volume", "mute", "subtitles", "stop", "audio_delay"]
         if (controls.indexOf(command.action) >= 0) {
             if (controlPending && command.action !== "stop") return
             pendingAction = command.action
@@ -92,7 +92,7 @@ Panel {
                 pendingPosition = Math.max(0, Math.min(playback.duration || 1e9, Number(command.value) + (command.relative ? (playback.position || 0) : 0)))
             } else if (command.action === "volume") pendingVolume = command.value
             else if (command.action === "mute") { command.muted = !playback.muted; pendingMuted = command.muted }
-            controlTimeout.interval = command.action === "seek" ? 60000 : 12000
+            controlTimeout.interval = ["seek", "audio_delay"].indexOf(command.action) >= 0 ? 90000 : 12000
             controlTimeout.restart()
         }
         if (command.action === "pick") root.close()
@@ -111,6 +111,11 @@ Panel {
               subtitleSize: subtitleSize.value, audio: audio.value, mode: mode.value,
               quality: quality.value, sound: sound.value, audioDelay: root.audioDelayMs / 1000, start: Number(start.text) || 0})
     }
+    function applyAudioDelay() {
+        if (busy || !playback.connected || Math.abs(audioDelayMs / 1000 - (playback.audioDelay || 0)) < 0.001) return
+        failed = false
+        send({action: "audio_delay", value: audioDelayMs / 1000})
+    }
     function exitApp() {
         exiting = true
         close()
@@ -126,7 +131,7 @@ Panel {
         var e
         try { e = JSON.parse(data) } catch (_) { return }
         if (e.event === "ready") { ready = true; send({action: "scan"}) }
-        else if (e.event === "busy") { busy = e.busy; busyAction = e.busy ? e.action : ""; if (!busy && e.action === "cast") { progress = -1; preparing = false } }
+        else if (e.event === "busy") { busy = e.busy; busyAction = e.busy ? e.action : ""; if (!busy && ["cast", "audio_delay"].indexOf(e.action) >= 0) { progress = -1; preparing = false } }
         else if (e.event === "phase") {
             phaseName = e.phase; phaseMessage = e.message
             preparing = ["connecting", "compatibility", "subtitles", "buffering", "loading"].indexOf(e.phase) >= 0
@@ -186,6 +191,7 @@ Panel {
         function scan(): void { if (!root.busy) root.send({action: "scan"}) }
         function openVideo(path: string): void { root.contextMode = false; root.chooseSource(path); root.open() }
         function useCompatibility(): void { mode.value = "convert" }
+        function setAudioDelay(milliseconds: int): void { root.audioDelayMs = Math.max(-1000, Math.min(1000, milliseconds)) }
         function resumeAt(seconds: real): void { start.text = String(Math.max(0, Math.floor(seconds))) }
         function castVideo(): void { if (!root.busy && root.sourcePath) root.cast() }
         function options(): void { root.optionsExpanded = true; root.open() }
@@ -500,9 +506,9 @@ Panel {
                                 Layout.fillWidth: true
                                 Caption { text: "Audio delay" }
                                 Item { Layout.fillWidth: true }
-                                Caption { text: root.audioDelayMs === 0 ? "In sync · 0 ms" : Math.abs(root.audioDelayMs) + " ms " + (root.audioDelayMs < 0 ? "earlier" : "later") }
+                                Caption { text: root.audioDelayMs === 0 ? "No adjustment · 0 ms" : Math.abs(root.audioDelayMs) + " ms " + (root.audioDelayMs < 0 ? "earlier" : "later") }
                             }
-                            PanelSlider {
+                            DelaySlider {
                                 Layout.fillWidth: true
                                 bar: root.bar
                                 minimum: -1000
@@ -510,19 +516,19 @@ Panel {
                                 step: 50
                                 integer: true
                                 value: root.audioDelayMs
-                                enabled: !root.busy
+                                enabled: !root.busy && !root.controlPending
                                 onMoved: value => root.audioDelayMs = Math.round(value / 50) * 50
-                                onReleased: value => root.audioDelayMs = Math.round(value / 50) * 50
+                                onReleased: value => { root.audioDelayMs = Math.round(value / 50) * 50; root.applyAudioDelay() }
                             }
                             RowLayout {
                                 Layout.fillWidth: true
                                 Caption { text: "1 s earlier" }
                                 Item { Layout.fillWidth: true }
-                                Action { text: "Reset"; fontSize: Style.font.caption; verticalPadding: 0; enabled: root.audioDelayMs !== 0; onClicked: root.audioDelayMs = 0 }
+                                Action { text: "Reset"; fontSize: Style.font.caption; verticalPadding: 0; enabled: root.audioDelayMs !== 0 && !root.busy && !root.controlPending; onClicked: { root.audioDelayMs = 0; root.applyAudioDelay() } }
                                 Item { Layout.fillWidth: true }
                                 Caption { text: "1 s later" }
                             }
-                            Caption { text: "If sound is behind the picture, move left. Applies when you restart the video."; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                            Caption { text: root.pendingAction === "audio_delay" ? "Adjusting audio… Your video will briefly rebuffer." : "Sound behind the picture? Drag left. Release to apply automatically with a brief rebuffer."; Layout.fillWidth: true; wrapMode: Text.Wrap }
                         }
                         Caption { text: root.profileDescription; visible: text !== ""; Layout.fillWidth: true; wrapMode: Text.Wrap }
                         TextField { id: start; Layout.fillWidth: true; placeholderText: "Start at (seconds)"; validator: DoubleValidator { bottom: 0 } enabled: !root.busy }

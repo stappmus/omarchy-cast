@@ -5,6 +5,7 @@ import contextlib
 import http.server
 import json
 import mimetypes
+import math
 import os
 from pathlib import Path
 import queue
@@ -192,7 +193,8 @@ class Worker:
                     muted=self.cast.status.volume_muted, connected=own,
                     device=self.cast.cast_info.friendly_name, live=bool(self.live),
                     bufferedStart=self.offset + start, bufferedEnd=self.offset + end,
-                    profile=self.plan.description if self.plan else '', phase=self.phase_name)
+                    profile=self.plan.description if self.plan else '', phase=self.phase_name,
+                    audioDelay=self.request.get('audioDelay', 0))
 
     def emit(self, event, **values):
         with self.lock:
@@ -324,6 +326,7 @@ class Worker:
         self.connect(request)
         self.phase('compatibility', 'Matching picture and sound to your TV…')
         metadata = probe(source)
+        self.metadata = metadata
         self.duration = float(metadata.get('format', {}).get('duration', 0) or 0)
         self.plan = choose_plan(self.cast.cast_info.model_name, source, metadata, request)
         self.emit('profile', **self.plan.json())
@@ -472,6 +475,24 @@ class Worker:
             if action == 'pause':
                 pause = r.get('paused', mc.status.player_is_playing)
                 mc.pause() if pause else mc.play()
+            elif action == 'audio_delay':
+                delay = float(r['value'])
+                if not math.isfinite(delay) or not -1 <= delay <= 1:
+                    raise ValueError('Audio delay must be between -1 and 1 seconds')
+                if delay == self.request.get('audioDelay', 0):
+                    return
+                position = self.snapshot()['position']
+                paused = mc.status.player_is_paused
+                request = dict(self.request, audioDelay=delay)
+                if request.get('mode') == 'direct':
+                    request['mode'] = 'auto'
+                plan = choose_plan(self.cast.cast_info.model_name, request['source'], self.metadata, request)
+                self.phase('buffering', 'Adjusting audio…')
+                mc.stop(timeout=3)
+                self.request = request
+                self.plan = plan
+                self.emit('profile', **plan.json())
+                self.start_media(position, paused=paused)
             elif action == 'seek':
                 target = float(r.get('value', 0))
                 if r.get('relative'):
@@ -533,7 +554,7 @@ class Worker:
                 except queue.Empty:
                     continue
                 self.cancel.clear()
-                busy_action = r.get('action') in ('scan', 'inspect', 'cast', 'pick')
+                busy_action = r.get('action') in ('scan', 'inspect', 'cast', 'pick', 'audio_delay')
                 if busy_action:
                     self.emit('busy', busy=True, action=r.get('action'))
                 success = True

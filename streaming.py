@@ -92,7 +92,11 @@ class LiveStream:
             args += ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-crf', '18', '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-level', profile.level, '-vf', ','.join(filters), '-force_key_frames', 'expr:gte(t,n_forced*2)', '-sc_threshold', '0']
         audio_delay = max(-1., min(1., float(audio_delay)))
         if audio_delay:
-            args += ['-af', f'asetpts=PTS+({audio_delay})/TB']
+            # Shift sample content, keeping a normal nonnegative audio timeline.
+            # A timestamp-only offset can disappear when a receiver rebases tracks.
+            audio_filter = (f'atrim=start={-audio_delay},asetpts=PTS-STARTPTS'
+                            if audio_delay < 0 else f'adelay={round(audio_delay * 1000)}:all=1')
+            args += ['-af', audio_filter]
         if profile.copy_audio and not audio_delay:
             args += ['-c:a', 'copy']
         else:
