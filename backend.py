@@ -128,15 +128,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 if partial:
                     self.send_header('Content-Range', f'bytes {start}-{end}/{size}')
                 self.end_headers()
-                if body:
-                    stream.seek(start)
-                    remaining = end - start + 1
-                    while remaining > 0:
-                        data = stream.read(min(256 * 1024, remaining))
-                        if not data:
-                            break
-                        self.wfile.write(data)
-                        remaining -= len(data)
+                if body and end >= start:
+                    # Avoid copying video chunks through Python; retains range limits.
+                    self.wfile.flush()
+                    self.connection.sendfile(stream, offset=start, count=end - start + 1)
         except FileNotFoundError:
             self.send_error(404)
         except (BrokenPipeError, ConnectionResetError):
@@ -154,7 +149,6 @@ class Worker:
         self.cast = None
         self.server = None
         self.url = ''
-        self.busy = False
         self.devices = {}
         cache = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'omarchy-cast'
         cache.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -170,6 +164,9 @@ class Worker:
         self.load_error = None
         self.phase_name = 'idle'
         self.last_diagnostic = {}
+        self.last_status = None
+        self.probe_cache = None
+        self.inactive_since = None
 
     def new_media_status(self, status):
         pass
@@ -199,6 +196,10 @@ class Worker:
 
     def emit(self, event, **values):
         with self.lock:
+            if event == 'status':
+                if values == self.last_status:
+                    return
+                self.last_status = dict(values)
             print(json.dumps(dict(event=event, **values)), flush=True)
             if event in ('error', 'diagnostic', 'profile', 'phase'):
                 with contextlib.suppress(OSError):
@@ -248,8 +249,19 @@ class Worker:
         finally:
             stop_discovery(browser)
 
+    def metadata_for(self, source):
+        source = os.fspath(source)
+        if urlsplit(source).scheme in ('http', 'https'):
+            return probe(source)
+        path = Path(source).resolve()
+        stat = path.stat()
+        key = (str(path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
+        if self.probe_cache is None or self.probe_cache[0] != key:
+            self.probe_cache = (key, probe(path))
+        return self.probe_cache[1]
+
     def inspect(self, path):
-        data = probe(path)
+        data = self.metadata_for(path)
         streams = data.get('streams', [])
         def options(kind):
             return [{'value': str(s['index']), 'label': f"{s['index']}: {s.get('tags', {}).get('title', s.get('tags', {}).get('language', 'Unknown language'))} · {s.get('codec_name', '?')}"} for s in streams if s['codec_type'] == kind]
@@ -332,7 +344,7 @@ class Worker:
         self.request = dict(request, source=source)
         self.connect(request)
         self.phase('compatibility', 'Matching picture and sound to your TV…')
-        metadata = probe(source)
+        metadata = self.metadata_for(source)
         self.metadata = metadata
         self.duration = float(metadata.get('format', {}).get('duration', 0) or 0)
         self.plan = choose_plan(self.cast.cast_info.model_name, source, metadata, request)
@@ -392,7 +404,7 @@ class Worker:
             self.phase('buffering', 'Building a small playback buffer…')
             self.url = ''
             self.live = LiveStream(Path(self.tmp.name) / uuid.uuid4().hex, source, self.plan,
-                                   self.request.get('audio', 'default'), self.offset, self.live_playhead, self.request.get('audioDelay', 0))
+                                   offset=self.offset, playhead=self.live_playhead, audio_delay=self.request.get('audioDelay', 0))
             self.live.wait_ready(self.cancel)
             self.url = self.server.mount(self.live.folder)
             mime = 'application/vnd.apple.mpegurl'
@@ -544,10 +556,28 @@ class Worker:
             except (ValueError, AttributeError):
                 self.emit('error', message='Invalid command')
         self.quit.set()
+        self.commands.put({'action': 'exit'})
         self.cancel.set()
         if self.process:
             with contextlib.suppress(ProcessLookupError):
                 self.process.terminate()
+
+    def release_inactive_session(self, now):
+        if not self.cast or not self.url:
+            self.inactive_since = None
+            return
+        status = self.cast.media_controller.status
+        finished = status.player_state == 'IDLE' and status.idle_reason == 'FINISHED'
+        taken_over = status.content_id != self.url
+        if not (finished or taken_over):
+            self.inactive_since = None
+            return
+        if self.inactive_since is None:
+            self.inactive_since = now
+        # Allow brief status gaps; never stop media owned by another app.
+        if now - self.inactive_since >= 10:
+            self.stop()
+            self.inactive_since = None
 
     def run(self):
         threading.Thread(target=self.input, daemon=True).start()
@@ -556,13 +586,16 @@ class Worker:
         try:
             while not self.quit.is_set():
                 if time.monotonic() >= next_status:
+                    self.release_inactive_session(time.monotonic())
                     self.emit('status', **self.snapshot())
-                    next_status = time.monotonic() + .5
+                    next_status = time.monotonic() + (.5 if self.cast else 5.)
                     if self.live and self.live.process.poll() not in (None, 0):
                         self.emit('error', message='Live encoder stopped: ' + '; '.join(self.live.errors)[-300:])
                         self.stop()
                 try:
-                    r = self.commands.get(timeout=.2)
+                    r = self.commands.get(timeout=max(.01, next_status - time.monotonic()))
+                    if self.quit.is_set():
+                        break
                 except queue.Empty:
                     continue
                 self.cancel.clear()
@@ -583,6 +616,7 @@ class Worker:
                         self.emit('busy', busy=False, action=r.get('action'))
                     self.emit('status', **self.snapshot())
                     self.emit('commandResult', id=r.get('id'), action=r.get('action'), ok=success)
+                    next_status = time.monotonic() + (.5 if self.cast else 5.)
         finally:
             self.stop()
             self.tmp.cleanup()
@@ -592,6 +626,7 @@ if __name__ == '__main__':
     worker = Worker()
     def terminate(*_):
         worker.quit.set()
+        worker.commands.put({'action': 'exit'})
         worker.cancel.set()
         if worker.process:
             with contextlib.suppress(ProcessLookupError):

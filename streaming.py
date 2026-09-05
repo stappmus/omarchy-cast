@@ -1,8 +1,6 @@
 """Bounded-ahead HLS encoder and receiver playback evidence."""
 from __future__ import annotations
-from dataclasses import dataclass
 import contextlib
-import json
 import os
 from pathlib import Path
 import re
@@ -68,17 +66,17 @@ class LiveStream:
     another stream at the requested movie timestamp. SIGSTOP throttles the
     encoder without discarding its codec state, including during TV pauses.
     """
-    def __init__(self, folder, source, profile, audio='default', offset=0, playhead=None, audio_delay=0):
+    def __init__(self, folder, source, profile, offset=0, playhead=None, audio_delay=0):
         self.folder = Path(folder)
         self.folder.mkdir(mode=0o700)
         self.playlist = self.folder / 'index.m3u8'
-        self.profile = profile
-        self.offset = offset
         self.playhead = playhead or (lambda: 0)
         self.closed = threading.Event()
         self.lock = threading.Lock()
         self.suspended = False
         self.durations = {}
+        self.playlist_signature = None
+        self.segment_duration = 2.
         self.window = (0., 0.)
         self.window_lock = threading.Lock()
         self.errors = []
@@ -131,6 +129,11 @@ class LiveStream:
 
     def _read_window_locked(self):
         try:
+            # FFmpeg atomically replaces the playlist only when a segment closes.
+            stat = self.playlist.stat()
+            signature = (stat.st_ino, stat.st_size, stat.st_mtime_ns)
+            if signature == self.playlist_signature:
+                return self.window
             text = self.playlist.read_text()
         except OSError:
             return self.window
@@ -143,10 +146,12 @@ class LiveStream:
         start = sum(d for i, d in self.durations.items() if i < first)
         end = start + sum(float(d) for d, _ in entries)
         self.window = (start, end)
+        self.segment_duration = max(self.durations.values(), default=2.)
+        self.playlist_signature = signature
         return self.window
 
     def _govern(self):
-        while not self.closed.wait(.1):
+        while not self.closed.wait(.5):
             _, end = self._read_window()
             head = self.playhead()
             position, starting = head if isinstance(head, tuple) else (head or 0, head is None)
@@ -155,7 +160,7 @@ class LiveStream:
             # several target-duration segments before reporting PLAYING.
             # Do not deadlock startup by throttling against an unstarted clock.
             with self.window_lock:
-                segment_duration = max(self.durations.values(), default=2)
+                segment_duration = self.segment_duration
             high_water = max(24, segment_duration * 6) if starting else max(24, segment_duration * 4)
             low_water = high_water - max(12, segment_duration * 2)
             with self.lock:

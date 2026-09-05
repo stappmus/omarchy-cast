@@ -4,7 +4,7 @@
 
 `python -m unittest discover -s tests -v`
 
-28 tests cover HTTP ranges/CORS and selected-file access, device and codec limits,
+33 tests cover HTTP ranges/CORS and selected-file access, device and codec limits,
 manual model selection, default/explicit audio tracks, cover-art exclusion,
 subtitle conversion and seek retiming, real HLS encoding and audio selection,
 receiver progress evidence, startup after a short encoder finishes, +/-1 second
@@ -54,3 +54,21 @@ cases; no other physical receiver was available for validation.
 Previous fixes retained: stable EVENT playlists for pause/resume, governor
 headroom for long GOPs, keyframe-aligned remux seeks, sample-based audio delay,
 and a drag-only delay control that ignores wheel scrolling.
+
+## Efficiency update — 0.3.1
+
+Added regressions for unchanged playlist reads and atomic updates, metadata cache
+invalidation, duplicate status suppression, safe inactive-session cleanup, and
+prompt worker shutdown while idle. The four synthetic Stue playback paths and
+both playing/paused audio adjustments passed again after these optimizations.
+
+A local microbenchmark with a 3,600-segment playlist took about 900 ms for 1,000
+unchanged window checks before caching and 0.9 ms afterward. This measures only
+the playlist-check path, not whole-app CPU or overall playback performance.
+The governor now wakes at 2 Hz instead of 10 Hz; idle status checks at 0.2 Hz
+instead of approximately 2 Hz. Playback status continues at 2 Hz, and queued
+commands wake the worker immediately.
+
+Removed 5.06 GiB of abandoned session cache on the development machine after
+confirming that its Cast workers and encoders had exited. No source videos were
+removed. Picture quality, codec policies, and buffer thresholds are unchanged.

@@ -52,7 +52,8 @@ The receiver must reach TCP 49786 on this computer. The network helper opens
 only that port from the current local subnet. Explicitly selected files and
 session-generated segments are served over local HTTP under random URLs;
 directories and arbitrary file paths are not exposed. Temporary segments live
-under `~/.cache/omarchy-cast/` and are removed on Stop or Exit. Abrupt termination
+under `~/.cache/omarchy-cast/` and are removed on Stop or Exit, or after a
+10-second grace period when playback finishes or another app takes over. Abrupt termination
 can leave a session directory there, but the encoder is terminated by the kernel
 even if it was suspended. Error and playback-phase diagnostics are kept locally
 in `~/.cache/omarchy-cast/diagnostics.jsonl`, rotating at 512 KiB.
@@ -87,7 +88,7 @@ disable the plugin, then `omarchy plugin remove stappmus.cast` to remove files.
 ## Validation status
 
 Version 0.1's prepared MP4 path was exercised on a Google TV Streamer.
-Version 0.3 passes 28 local regression tests and was tested on Stue for original
+Version 0.3 passes 33 local regression tests and was tested on Stue for original
 playback, remuxing, live conversion, HEVC HLS, pause/resume, seeking and audio
 adjustment. See [VALIDATION.md](VALIDATION.md) for the test scope and limits.
 
@@ -95,3 +96,12 @@ adjustment. See [VALIDATION.md](VALIDATION.md) for the test scope and limits.
 
 Run `python -m unittest discover -s tests -v` for local tests (including FFmpeg).
 These tests do not connect to a Chromecast.
+
+## Efficiency
+
+Unchanged playlists are checked by file metadata instead of repeatedly reading
+and parsing the full movie index. The governor checks twice per second; idle
+workers sleep for up to five seconds but wake immediately for commands. Duplicate
+status messages are suppressed. Local metadata is cached for the last selected
+file and invalidated when the file changes. HTTP transfers use `socket.sendfile`
+with byte-range limits. Encoding quality and buffer headroom are unchanged.

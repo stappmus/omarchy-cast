@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "stappmus.cast",
   "name": "Omarchy Cast",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "author": "stappmus",
   "license": "MIT",
   "description": "Cast videos with subtitles, audio selection and playback controls in a native Omarchy panel.",
