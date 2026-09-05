@@ -25,6 +25,7 @@ Panel {
     property var subtitleTracks: [{value: "none", label: "Off"}, {value: "external", label: "External subtitle file…"}]
     property var playback: ({connected: false, state: "IDLE", position: 0, duration: 0, volume: 0.5})
     property bool subtitlesEnabled: true
+    property int audioDelayMs: 0
     property int progress: -1
     property string phaseName: "idle"
     property string phaseMessage: ""
@@ -108,7 +109,7 @@ Panel {
         send({action: "cast", source: root.sourcePath, device: receiver.value, host: host.text,
               subtitle: subtitles.value, external: external.text, language: language.text,
               subtitleSize: subtitleSize.value, audio: audio.value, mode: mode.value,
-              quality: quality.value, sound: sound.value, start: Number(start.text) || 0})
+              quality: quality.value, sound: sound.value, audioDelay: root.audioDelayMs / 1000, start: Number(start.text) || 0})
     }
     function exitApp() {
         exiting = true
@@ -184,6 +185,7 @@ Panel {
         function close(): void { root.close() }
         function scan(): void { if (!root.busy) root.send({action: "scan"}) }
         function openVideo(path: string): void { root.contextMode = false; root.chooseSource(path); root.open() }
+        function useCompatibility(): void { mode.value = "convert" }
         function resumeAt(seconds: real): void { start.text = String(Math.max(0, Math.floor(seconds))) }
         function castVideo(): void { if (!root.busy && root.sourcePath) root.cast() }
         function options(): void { root.optionsExpanded = true; root.open() }
@@ -491,12 +493,43 @@ Panel {
                         Caption { visible: mode.value !== "direct"; text: "Compatible video stays unchanged. When needed, conversion runs live with a small buffer."; Layout.fillWidth: true; wrapMode: Text.Wrap }
                         Dropdown { id: quality; Layout.fillWidth: true; label: "Video quality"; value: "original"; options: [{value: "original", label: "Best for this TV"}, {value: "2160", label: "Up to 4K"}, {value: "1080", label: "Up to 1080p"}, {value: "720", label: "Up to 720p"}]; enabled: !root.busy && mode.value !== "direct" }
                         Dropdown { id: sound; Layout.fillWidth: true; label: "Sound"; value: "stereo"; options: [{value: "stereo", label: "High-quality stereo"}, {value: "surround", label: "Surround 5.1"}]; enabled: !root.busy }
+                        ColumnLayout {
+                            Layout.fillWidth: true
+                            spacing: Style.space(8)
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Caption { text: "Audio delay" }
+                                Item { Layout.fillWidth: true }
+                                Caption { text: root.audioDelayMs === 0 ? "In sync · 0 ms" : Math.abs(root.audioDelayMs) + " ms " + (root.audioDelayMs < 0 ? "earlier" : "later") }
+                            }
+                            PanelSlider {
+                                Layout.fillWidth: true
+                                bar: root.bar
+                                minimum: -1000
+                                maximum: 1000
+                                step: 50
+                                integer: true
+                                value: root.audioDelayMs
+                                enabled: !root.busy
+                                onMoved: value => root.audioDelayMs = Math.round(value / 50) * 50
+                                onReleased: value => root.audioDelayMs = Math.round(value / 50) * 50
+                            }
+                            RowLayout {
+                                Layout.fillWidth: true
+                                Caption { text: "1 s earlier" }
+                                Item { Layout.fillWidth: true }
+                                Action { text: "Reset"; fontSize: Style.font.caption; verticalPadding: 0; enabled: root.audioDelayMs !== 0; onClicked: root.audioDelayMs = 0 }
+                                Item { Layout.fillWidth: true }
+                                Caption { text: "1 s later" }
+                            }
+                            Caption { text: "If sound is behind the picture, move left. Applies when you restart the video."; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                        }
                         Caption { text: root.profileDescription; visible: text !== ""; Layout.fillWidth: true; wrapMode: Text.Wrap }
                         TextField { id: start; Layout.fillWidth: true; placeholderText: "Start at (seconds)"; validator: DoubleValidator { bottom: 0 } enabled: !root.busy }
                         TextField { id: host; Layout.fillWidth: true; placeholderText: "TV IP address (optional)"; enabled: !root.busy }
                         Caption { visible: host.text.trim() !== ""; text: "Using this address instead of the selected TV."; Layout.fillWidth: true; wrapMode: Text.Wrap }
                         Action { text: "Use a video link"; enabled: !root.busy; onClicked: { root.urlEntry = true; linkInput.forceActiveFocus() } }
-                        Action { visible: !!root.playback.connected; text: "Apply & restart video"; bordered: true; Layout.fillWidth: true; enabled: !root.busy; onClicked: root.cast() }
+                        Action { visible: !!root.playback.connected; text: "Apply & restart video"; bordered: true; Layout.fillWidth: true; enabled: !root.busy; onClicked: { start.text = String(Math.floor(root.playback.position || 0)); root.cast() } }
                         Caption { visible: !!root.playback.connected; text: "Track and quality changes apply when the video restarts."; Layout.fillWidth: true; wrapMode: Text.Wrap }
                     }
                 }

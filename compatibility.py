@@ -6,6 +6,7 @@ Stereo AAC is therefore the default for converted audio; surround is opt-in.
 """
 from dataclasses import dataclass, asdict
 from fractions import Fraction
+import math
 from pathlib import Path
 from urllib.parse import urlsplit
 
@@ -80,6 +81,12 @@ def choose_plan(model, source, metadata, request):
     if suffix == '.webm' and copy_video and audio_codec in ('opus', 'vorbis') and source_channels <= channels and selected == 'default':
         direct = True
         copy_audio = True
+    audio_delay = float(request.get('audioDelay', 0))
+    if not math.isfinite(audio_delay):
+        raise ValueError('Audio delay must be a finite number')
+    if audio_delay:
+        direct = False
+        copy_audio = False
     if request.get('mode') == 'direct':
         if not direct:
             raise ValueError('This file does not match the receiver profile for original-file playback. Use Automatic.')

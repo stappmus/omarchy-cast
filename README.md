@@ -50,7 +50,7 @@ can leave a session directory there.
 ## Use
 
 Drop or select a video, select a TV, optionally select subtitles, and press
-**Play on your TV**. Audio tracks, sound output, quality limits, and a manual TV
+**Play on your TV**. Audio tracks, sound output, an audio-delay slider (−1 s to +1 s in 50 ms steps), quality limits, and a manual TV
 address are under **Options**. Changes apply when restarting the video.
 URLs must point to media, not web pages or DRM content. Image subtitles require
 an external text subtitle file. Closing the panel keeps playback running.

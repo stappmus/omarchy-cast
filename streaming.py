@@ -21,7 +21,7 @@ class PlaybackEvidence:
         self.progress_samples = 0
 
     def observe(self, state, position, idle_reason=None):
-        if state == 'IDLE' and idle_reason in ('ERROR', 'CANCELLED', 'INTERRUPTED'):
+        if state == 'IDLE' and idle_reason == 'ERROR':
             return 'failed'
         if state != 'PLAYING':
             return 'waiting'
@@ -62,7 +62,7 @@ class LiveStream:
     another stream at the requested movie timestamp. SIGSTOP throttles the
     encoder without discarding its codec state, including during TV pauses.
     """
-    def __init__(self, folder, source, profile, audio='default', offset=0, playhead=None):
+    def __init__(self, folder, source, profile, audio='default', offset=0, playhead=None, audio_delay=0):
         self.folder = Path(folder)
         self.folder.mkdir(mode=0o700)
         self.playlist = self.folder / 'index.m3u8'
@@ -90,7 +90,10 @@ class LiveStream:
                 filters += ['zscale=t=linear:npl=100', 'format=gbrpf32le', 'zscale=p=bt709', 'tonemap=tonemap=hable:desat=0', 'zscale=t=bt709:m=bt709:r=tv']
             filters += [rf'scale=w=min(iw\,{profile.height * 16 // 9}):h=min(ih\,{profile.height}):force_original_aspect_ratio=decrease:force_divisible_by=2:flags=lanczos', f'fps={profile.fps}']
             args += ['-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency', '-crf', '18', '-pix_fmt', 'yuv420p', '-profile:v', 'high', '-level', profile.level, '-vf', ','.join(filters), '-force_key_frames', 'expr:gte(t,n_forced*2)', '-sc_threshold', '0']
-        if profile.copy_audio:
+        audio_delay = max(-1., min(1., float(audio_delay)))
+        if audio_delay:
+            args += ['-af', f'asetpts=PTS+({audio_delay})/TB']
+        if profile.copy_audio and not audio_delay:
             args += ['-c:a', 'copy']
         else:
             args += ['-c:a', 'aac', '-ac', str(max(1, profile.channels)), '-ar', '48000', '-b:a', '512k' if profile.channels > 2 else '320k']

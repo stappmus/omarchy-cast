@@ -382,7 +382,7 @@ class Worker:
             self.phase('buffering', 'Building a small playback buffer…')
             self.url = ''
             self.live = LiveStream(Path(self.tmp.name) / uuid.uuid4().hex, source, self.plan,
-                                   self.request.get('audio', 'default'), self.offset, self.live_playhead)
+                                   self.request.get('audio', 'default'), self.offset, self.live_playhead, self.request.get('audioDelay', 0))
             self.live.wait_ready(self.cancel)
             self.url = self.server.mount(self.live.folder)
             mime = 'application/vnd.apple.mpegurl'
@@ -424,7 +424,11 @@ class Worker:
                 continue
             result = evidence.observe(status.player_state, status.current_time, status.idle_reason)
             if result == 'failed':
-                raise ValueError('The TV rejected playback. Try Convert for this TV in Options.')
+                self.emit('diagnostic', state=status.player_state, idleReason=status.idle_reason,
+                          position=status.current_time, httpRequests=sum(self.server.requests.values()),
+                          requestedFiles=[Path(path).name for path in self.server.requests],
+                          buffer=self.live.window if self.live else None)
+                raise ValueError(f'The TV reported a playback error ({status.idle_reason}). Select Convert for this TV in Options and retry.')
             if result == 'playing' or (paused and status.player_state == 'PAUSED'):
                 self.phase('playing', self.plan.description)
                 self.emit('status', **self.snapshot())
