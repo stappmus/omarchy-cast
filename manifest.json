@@ -1,0 +1,22 @@
+{
+  "schemaVersion": 1,
+  "id": "stappmus.cast",
+  "name": "Omarchy Cast",
+  "version": "0.1.0",
+  "author": "stappmus",
+  "license": "MIT",
+  "description": "Cast videos with subtitles, audio selection and playback controls in a native Omarchy panel.",
+  "kinds": ["bar-widget"],
+  "activation": "on-demand",
+  "entryPoints": {"barWidget": "CastPanel.qml"},
+  "barWidget": {
+    "displayName": "Omarchy Cast",
+    "description": "Send videos to Chromecast. Right-click the bar icon to exit.",
+    "category": "Media",
+    "aliases": ["chromecast", "cast", "video", "subtitles"],
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {},
+    "schema": []
+  }
+}

@@ -1,0 +1,12 @@
+#!/bin/bash
+set -euo pipefail
+for attempt in {1..30}; do
+  if omarchy plugin enable stappmus.cast >/dev/null 2>&1; then break; fi
+  sleep 0.2
+done
+for attempt in {1..30}; do
+  if omarchy-shell stappmus.cast open >/dev/null 2>&1; then exit 0; fi
+  sleep 0.1
+done
+printf '%s\n' 'Could not open Omarchy Cast. Check the Omarchy shell log.' >&2
+exit 1
