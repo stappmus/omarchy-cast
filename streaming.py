@@ -128,15 +128,23 @@ class LiveStream:
     def _govern(self):
         while not self.closed.wait(.1):
             _, end = self._read_window()
-            ahead = end - max(0, self.playhead())
+            head = self.playhead()
+            position, starting = head if isinstance(head, tuple) else (head or 0, head is None)
+            ahead = end - max(0, position)
+            # A rolling HLS receiver may begin near the live edge and require
+            # several target-duration segments before reporting PLAYING.
+            # Do not deadlock startup by throttling against an unstarted clock.
+            segment_duration = max(self.durations.values(), default=2)
+            high_water = max(24, segment_duration * 6) if starting else max(24, segment_duration * 4)
+            low_water = high_water - max(12, segment_duration * 2)
             with self.lock:
                 if self.process.poll() is not None:
                     return
                 with contextlib.suppress(ProcessLookupError):
-                    if not self.suspended and ahead >= 24:
+                    if not self.suspended and ahead >= high_water:
                         self.process.send_signal(signal.SIGSTOP)
                         self.suspended = True
-                    elif self.suspended and ahead < 12:
+                    elif self.suspended and ahead < low_water:
                         self.process.send_signal(signal.SIGCONT)
                         self.suspended = False
 

@@ -167,6 +167,7 @@ class Worker:
         self.subtitle_text = ''
         self.load_error = None
         self.phase_name = 'idle'
+        self.last_diagnostic = {}
 
     def new_media_status(self, status):
         pass
@@ -196,6 +197,8 @@ class Worker:
     def emit(self, event, **values):
         with self.lock:
             print(json.dumps(dict(event=event, **values)), flush=True)
+            if event in ('error', 'diagnostic'):
+                print('Cast diagnostic: ' + json.dumps(dict(event=event, **values)), file=sys.stderr, flush=True)
 
     def run_ffmpeg(self, args, duration=0):
         if self.cancel.is_set():
@@ -299,6 +302,12 @@ class Worker:
                 raise ValueError('Select your TV, or enter its IP address in Options')
             self.cast = pychromecast.get_chromecast_from_host((info.host, info.port, info.uuid, info.model_name, info.friendly_name), tries=2, timeout=5)
         self.cast.wait(timeout=10)
+        # A user-requested new cast gets a fresh Default Media Receiver.
+        # In particular, do not reuse its audio renderer after a Bluetooth
+        # route change. This runs only on Cast, never on pause/seek/resume.
+        if self.cast.status.app_id == 'CC1AD845':
+            self.phase('connecting', 'Refreshing the TV player…')
+            self.cast.quit_app(timeout=5)
         self.cast.media_controller.register_status_listener(self)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
             route.connect((self.cast.cast_info.host, self.cast.cast_info.port))
@@ -337,9 +346,11 @@ class Worker:
         self.start_media(max(0, float(request.get('start', 0))))
 
     def live_playhead(self):
-        if self.cast and self.url and self.cast.media_controller.status.content_id == self.url:
-            return float(self.cast.media_controller.status.adjusted_current_time or 0)
-        return 0
+        if self.cast and self.url:
+            status = self.cast.media_controller.status
+            if status.content_id == self.url:
+                return (float(status.adjusted_current_time or 0), status.player_state not in ('PLAYING', 'PAUSED'))
+        return None
 
     def start_media(self, offset, paused=False):
         self.release_live()
@@ -380,7 +391,7 @@ class Worker:
                       subtitles_lang=self.request.get('language', 'en') or 'en',
                       media_info=info, callback_function=loaded)
         evidence = PlaybackEvidence()
-        deadline = time.monotonic() + 25
+        deadline = time.monotonic() + 45
         next_poll = 0
         while time.monotonic() < deadline:
             if self.cancel.wait(.15):
@@ -403,6 +414,13 @@ class Worker:
                 self.emit('status', **self.snapshot())
                 return
         route = urlsplit(self.url).path
+        self.last_diagnostic = dict(state=mc.status.player_state, idleReason=mc.status.idle_reason,
+                                    position=mc.status.current_time, matches=mc.status.content_id == self.url,
+                                    httpRequests=sum(self.server.requests.values()),
+                                    requestedFiles=[Path(path).name for path in self.server.requests],
+                                    buffer=self.live.window if self.live else None,
+                                    encoderPaused=self.live.suspended if self.live else False)
+        self.emit('diagnostic', **self.last_diagnostic)
         if not self.server.requests.get(route) and urlsplit(self.url).hostname == self.server.server_address[0]:
             raise ValueError('The TV cannot reach this computer. Allow TCP 49786 from your local network.')
         raise ValueError('The TV did not confirm playback. Try Convert for this TV in Options; quality will not be reduced automatically.')
