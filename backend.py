@@ -352,9 +352,25 @@ class Worker:
                 return (float(status.adjusted_current_time or 0), status.player_state not in ('PLAYING', 'PAUSED'))
         return None
 
+    def seek_anchor(self, offset):
+        if not offset or not self.plan.copy_video:
+            return offset
+        # Stream-copy input seeks preserve pre-roll. Align BOTH tracks to an
+        # actual video keyframe, then let the receiver seek the small remainder.
+        result = subprocess.run(['ffprobe', '-v', 'error', '-read_intervals', f'{max(0, offset - 30)}%{offset + 2}',
+                                 '-select_streams', 'v:0', '-skip_frame', 'nokey', '-show_frames',
+                                 '-show_entries', 'frame=best_effort_timestamp_time', '-of', 'json', self.request['source']],
+                                capture_output=True, text=True, timeout=20)
+        if result.returncode:
+            raise ValueError('Could not locate a clean video seek point')
+        frames = json.loads(result.stdout).get('frames', [])
+        times = [float(f['best_effort_timestamp_time']) for f in frames if 'best_effort_timestamp_time' in f]
+        candidates = [t for t in times if 0 <= t <= offset]
+        return max(candidates) if candidates else 0
+
     def start_media(self, offset, paused=False):
         self.release_live()
-        self.offset = offset if self.plan.transport == 'hls' else 0
+        self.offset = self.seek_anchor(offset) if self.plan.transport == 'hls' else 0
         self.load_error = None
         source = self.request['source']
         subtitles_url = None
@@ -366,7 +382,7 @@ class Worker:
             self.phase('buffering', 'Building a small playback buffer…')
             self.url = ''
             self.live = LiveStream(Path(self.tmp.name) / uuid.uuid4().hex, source, self.plan,
-                                   self.request.get('audio', 'default'), offset, self.live_playhead)
+                                   self.request.get('audio', 'default'), self.offset, self.live_playhead)
             self.live.wait_ready(self.cancel)
             self.url = self.server.mount(self.live.folder)
             mime = 'application/vnd.apple.mpegurl'
@@ -386,7 +402,7 @@ class Worker:
                 self.load_error = 'The TV could not load this stream'
         mc = self.cast.media_controller
         mc.play_media(self.url, mime, title=Path(urlsplit(source).path).name or 'Video',
-                      stream_type='BUFFERED', current_time=0 if self.live else offset,
+                      stream_type='BUFFERED', current_time=max(0, offset - self.offset) if self.live else offset,
                       autoplay=not paused, subtitles=subtitles_url,
                       subtitles_lang=self.request.get('language', 'en') or 'en',
                       media_info=info, callback_function=loaded)

@@ -184,6 +184,7 @@ Panel {
         function close(): void { root.close() }
         function scan(): void { if (!root.busy) root.send({action: "scan"}) }
         function openVideo(path: string): void { root.contextMode = false; root.chooseSource(path); root.open() }
+        function resumeAt(seconds: real): void { start.text = String(Math.max(0, Math.floor(seconds))) }
         function castVideo(): void { if (!root.busy && root.sourcePath) root.cast() }
         function options(): void { root.optionsExpanded = true; root.open() }
         function contextMenu(): void { root.contextMode = true; root.open() }

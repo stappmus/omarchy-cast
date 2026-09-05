@@ -57,7 +57,8 @@ def shift_vtt(text, offset):
 class LiveStream:
     """FFmpeg produces 2-second HLS segments, keeping ~12–24 seconds ahead.
 
-    A rolling playlist retains ~60 seconds. Seeking outside that window starts
+    An EVENT playlist retains produced segments so a paused movie never ages
+    out of a moving live window. Seeking beyond produced footage starts
     another stream at the requested movie timestamp. SIGSTOP throttles the
     encoder without discarding its codec state, including during TV pauses.
     """
@@ -94,7 +95,7 @@ class LiveStream:
         else:
             args += ['-c:a', 'aac', '-ac', str(max(1, profile.channels)), '-ar', '48000', '-b:a', '512k' if profile.channels > 2 else '320k']
         suffix = 'm4s' if profile.fmp4 else 'ts'
-        args += ['-f', 'hls', '-hls_time', '2', '-hls_list_size', '30', '-hls_delete_threshold', '3', '-hls_flags', 'delete_segments+temp_file+independent_segments']
+        args += ['-f', 'hls', '-hls_time', '2', '-hls_list_size', '0', '-hls_playlist_type', 'event', '-hls_flags', 'temp_file+independent_segments']
         if profile.fmp4:
             args += ['-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4']
         args += ['-hls_segment_filename', str(self.folder / ('segment%06d.' + suffix)), str(self.playlist)]

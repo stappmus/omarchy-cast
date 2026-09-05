@@ -55,7 +55,7 @@ address are under **Options**. Changes apply when restarting the video.
 URLs must point to media, not web pages or DRM content. Image subtitles require
 an external text subtitle file. Closing the panel keeps playback running.
 
-Live conversion retains a rolling segment window. Seeking outside that window
+Live conversion retains a stable EVENT playlist and already-produced segments until Stop or Exit. Seeking beyond produced footage
 restarts conversion at the selected movie position with another short buffer.
 There is no silent automatic resolution reduction. If encoding cannot keep up,
 choose a lower quality explicitly. Playback errors do not prove that a codec is
