@@ -9,8 +9,14 @@ import re
 import shutil
 import signal
 import subprocess
+import sys
 import threading
 import time
+
+
+def spawn_encoder(args, **kwargs):
+    return subprocess.Popen([sys.executable, str(Path(__file__).with_name('encoder.py')),
+                             str(os.getpid()), *args], **kwargs)
 
 
 class PlaybackEvidence:
@@ -79,7 +85,9 @@ class LiveStream:
         args = ['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', '-readrate', '4', '-readrate_initial_burst', '12']
         if offset:
             args += ['-ss', str(offset)]
-        args += ['-i', str(source), '-map', '0:v:0', '-map', '0:a:0?' if audio == 'default' else f'0:{int(audio)}', '-sn']
+        args += ['-i', str(source), '-map', f'0:{profile.video_index}', '-sn']
+        if profile.audio_index is not None:
+            args += ['-map', f'0:{profile.audio_index}']
         if profile.copy_video:
             args += ['-c:v', 'copy']
             if profile.fmp4:
@@ -106,7 +114,7 @@ class LiveStream:
         if profile.fmp4:
             args += ['-hls_segment_type', 'fmp4', '-hls_fmp4_init_filename', 'init.mp4']
         args += ['-hls_segment_filename', str(self.folder / ('segment%06d.' + suffix)), str(self.playlist)]
-        self.process = subprocess.Popen(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
+        self.process = spawn_encoder(args, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True)
         self.error_thread = threading.Thread(target=self._errors, daemon=True)
         self.governor = threading.Thread(target=self._govern, daemon=True)
         self.error_thread.start()
@@ -118,6 +126,10 @@ class LiveStream:
             del self.errors[:-12]
 
     def _read_window(self):
+        with self.window_lock:
+            return self._read_window_locked()
+
+    def _read_window_locked(self):
         try:
             text = self.playlist.read_text()
         except OSError:
@@ -142,7 +154,8 @@ class LiveStream:
             # A rolling HLS receiver may begin near the live edge and require
             # several target-duration segments before reporting PLAYING.
             # Do not deadlock startup by throttling against an unstarted clock.
-            segment_duration = max(self.durations.values(), default=2)
+            with self.window_lock:
+                segment_duration = max(self.durations.values(), default=2)
             high_water = max(24, segment_duration * 6) if starting else max(24, segment_duration * 4)
             low_water = high_water - max(12, segment_duration * 2)
             with self.lock:
@@ -161,8 +174,9 @@ class LiveStream:
         while time.monotonic() < deadline:
             if cancel.is_set() or self.closed.is_set():
                 raise InterruptedError('Cancelled')
-            _, end = self.window
             code = self.process.poll()
+            # An encoder may exit between governor ticks (especially short clips).
+            _, end = self._read_window()
             if end >= 6 or (code == 0 and end > 0):
                 return end
             if code is not None:

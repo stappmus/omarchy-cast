@@ -109,7 +109,7 @@ Panel {
         send({action: "cast", source: root.sourcePath, device: receiver.value, host: host.text,
               subtitle: subtitles.value, external: external.text, language: language.text,
               subtitleSize: subtitleSize.value, audio: audio.value, mode: mode.value,
-              quality: quality.value, sound: sound.value, audioDelay: root.audioDelayMs / 1000, start: Number(start.text) || 0})
+              quality: quality.value, sound: sound.value, deviceProfile: deviceProfile.value, audioDelay: root.audioDelayMs / 1000, start: Number(start.text) || 0})
     }
     function applyAudioDelay() {
         if (busy || !playback.connected || Math.abs(audioDelayMs / 1000 - (playback.audioDelay || 0)) < 0.001) return
@@ -497,6 +497,21 @@ Panel {
                         }
                         Dropdown { id: mode; Layout.fillWidth: true; label: "Compatibility"; value: "auto"; options: [{value: "auto", label: "Automatic"}, {value: "direct", label: "Play original file"}, {value: "convert", label: "Convert for this TV"}]; enabled: !root.busy }
                         Caption { visible: mode.value !== "direct"; text: "Compatible video stays unchanged. When needed, conversion runs live with a small buffer."; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                        Dropdown {
+                            id: deviceProfile; Layout.fillWidth: true; label: "Device model"; value: "auto"; enabled: !root.busy
+                            options: [
+                                {value: "auto", label: "Detect automatically"},
+                                {value: "chromecast12", label: "Chromecast 1st / 2nd generation"},
+                                {value: "chromecast3", label: "Chromecast 3rd generation"},
+                                {value: "ultra", label: "Chromecast Ultra"},
+                                {value: "googletv4k", label: "Chromecast with Google TV (4K)"},
+                                {value: "googletvhd", label: "Chromecast with Google TV (HD)"},
+                                {value: "streamer", label: "Google TV Streamer"},
+                                {value: "nesthub", label: "Nest Hub"},
+                                {value: "nesthubmax", label: "Nest Hub Max"}
+                            ]
+                        }
+                        Caption { text: "Choose the model if your TV only identifies itself as Chromecast."; Layout.fillWidth: true; wrapMode: Text.Wrap }
                         Dropdown { id: quality; Layout.fillWidth: true; label: "Video quality"; value: "original"; options: [{value: "original", label: "Best for this TV"}, {value: "2160", label: "Up to 4K"}, {value: "1080", label: "Up to 1080p"}, {value: "720", label: "Up to 720p"}]; enabled: !root.busy && mode.value !== "direct" }
                         Dropdown { id: sound; Layout.fillWidth: true; label: "Sound"; value: "stereo"; options: [{value: "stereo", label: "High-quality stereo"}, {value: "surround", label: "Surround 5.1"}]; enabled: !root.busy }
                         ColumnLayout {

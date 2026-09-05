@@ -24,7 +24,7 @@ import pychromecast
 from pychromecast.discovery import CastBrowser, SimpleCastListener, stop_discovery
 from zeroconf import Zeroconf
 from compatibility import choose_plan
-from streaming import LiveStream, PlaybackEvidence, shift_vtt
+from streaming import LiveStream, PlaybackEvidence, shift_vtt, spawn_encoder
 
 
 def probe(path):
@@ -120,7 +120,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
                 self.send_response(206 if partial else 200)
                 self.send_header('Content-Type', mime)
-                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Cache-Control', 'no-store' if route.endswith('.m3u8') else 'no-cache')
                 self.send_header('Content-Length', str(max(0, end - start + 1)))
                 self.send_header('Accept-Ranges', 'bytes')
                 self.send_header('Access-Control-Allow-Origin', '*')
@@ -159,6 +159,7 @@ class Worker:
         cache = Path(os.environ.get('XDG_CACHE_HOME', Path.home() / '.cache')) / 'omarchy-cast'
         cache.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.tmp = tempfile.TemporaryDirectory(prefix='session-', dir=cache)
+        self.diagnostics_path = cache / 'diagnostics.jsonl'
         self.process = None
         self.live = None
         self.offset = 0.
@@ -199,13 +200,19 @@ class Worker:
     def emit(self, event, **values):
         with self.lock:
             print(json.dumps(dict(event=event, **values)), flush=True)
+            if event in ('error', 'diagnostic', 'profile', 'phase'):
+                with contextlib.suppress(OSError):
+                    if self.diagnostics_path.exists() and self.diagnostics_path.stat().st_size > 512 * 1024:
+                        self.diagnostics_path.replace(self.diagnostics_path.with_suffix('.previous.jsonl'))
+                    with self.diagnostics_path.open('a') as log:
+                        log.write(json.dumps(dict(time=time.time(), event=event, **values)) + '\n')
             if event in ('error', 'diagnostic'):
                 print('Cast diagnostic: ' + json.dumps(dict(event=event, **values)), file=sys.stderr, flush=True)
 
     def run_ffmpeg(self, args, duration=0):
         if self.cancel.is_set():
             raise ValueError('Preparation cancelled')
-        self.process = subprocess.Popen(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', *args, '-progress', 'pipe:1'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        self.process = spawn_encoder(['ffmpeg', '-nostdin', '-hide_banner', '-loglevel', 'error', '-y', *args, '-progress', 'pipe:1'], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
         # Drain stderr separately so a malformed file cannot block the encoder.
         errors = []
         def drain():
@@ -416,7 +423,7 @@ class Worker:
             if self.cancel.wait(.15):
                 raise InterruptedError('Cancelled')
             if self.load_error:
-                raise ValueError(self.load_error + '. Try Convert for this TV in Options.')
+                raise ValueError(self.playback_error(self.load_error))
             if self.live and self.live.process.poll() not in (None, 0):
                 raise ValueError('Live conversion failed: ' + '; '.join(self.live.errors)[-300:])
             if time.monotonic() >= next_poll:
@@ -431,7 +438,7 @@ class Worker:
                           position=status.current_time, httpRequests=sum(self.server.requests.values()),
                           requestedFiles=[Path(path).name for path in self.server.requests],
                           buffer=self.live.window if self.live else None)
-                raise ValueError(f'The TV reported a playback error ({status.idle_reason}). Select Convert for this TV in Options and retry.')
+                raise ValueError(self.playback_error(f'The TV reported a playback error ({status.idle_reason})'))
             if result == 'playing' or (paused and status.player_state == 'PAUSED'):
                 self.phase('playing', self.plan.description)
                 self.emit('status', **self.snapshot())
@@ -446,7 +453,12 @@ class Worker:
         self.emit('diagnostic', **self.last_diagnostic)
         if not self.server.requests.get(route) and urlsplit(self.url).hostname == self.server.server_address[0]:
             raise ValueError('The TV cannot reach this computer. Allow TCP 49786 from your local network.')
-        raise ValueError('The TV did not confirm playback. Try Convert for this TV in Options; quality will not be reduced automatically.')
+        raise ValueError(self.playback_error('The TV did not confirm playback'))
+
+    def playback_error(self, message):
+        if self.plan and self.plan.transport == 'hls' and not self.plan.copy_video:
+            return message + '. Conversion is already enabled. Stop and retry; if it persists, restart the TV player. Details are saved in the Cast diagnostics log.'
+        return message + '. Try Convert for this TV in Options. This error alone does not identify an unsupported codec.'
 
     def command(self, r):
         action = r.get('action')
@@ -561,6 +573,8 @@ class Worker:
                 try:
                     self.command(r)
                 except Exception as error:
+                    if r.get('action') in ('audio_delay', 'seek') and self.phase_name in ('buffering', 'loading'):
+                        self.stop()
                     success = False
                     self.phase_name = 'idle'
                     self.emit('error', message=str(error))

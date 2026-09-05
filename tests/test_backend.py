@@ -69,6 +69,29 @@ class OwnershipTests(unittest.TestCase):
         w.tmp.cleanup()
 
 
+class AudioAdjustmentTests(unittest.TestCase):
+    def test_adjustment_preserves_position_pause_and_tracks(self):
+        from types import SimpleNamespace
+        from test_compatibility import media
+        for paused in (False, True):
+            with self.subTest(paused=paused):
+                w=Worker(); w.emit=Mock(); w.cast=Mock(); w.url='owned'
+                w.cast.cast_info.model_name='Google TV Streamer'
+                w.cast.media_controller.status=SimpleNamespace(content_id='owned', adjusted_current_time=42.,
+                    player_state='PAUSED' if paused else 'PLAYING', player_is_paused=paused, title='test')
+                w.offset=30; w.duration=200; w.metadata=media()
+                w.request=dict(source='movie.mp4',mode='direct',audio='default',subtitle='3')
+                w.start_media=Mock()
+                try:
+                    w.command(dict(action='audio_delay',value=-.5))
+                    w.start_media.assert_called_once_with(72.,paused=paused)
+                    self.assertEqual(w.request['subtitle'],'3')
+                    self.assertEqual(w.request['audioDelay'],-.5)
+                    self.assertEqual(w.plan.transport,'hls')
+                    self.assertFalse(w.plan.copy_audio)
+                finally: w.stop(); w.tmp.cleanup()
+
+
 class ConversionTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -88,6 +111,12 @@ class ConversionTests(unittest.TestCase):
         info = SimpleNamespace(host='127.0.0.1', port=8009, uuid='test', model_name='Test', friendly_name='Test')
         w.devices['test'] = info
         cast = Mock(); cast.cast_info = info
+        cast.status.volume_level = 1; cast.status.volume_muted = False
+        cast.media_controller.status = SimpleNamespace(content_id='', player_state='IDLE', current_time=0., adjusted_current_time=0., idle_reason=None, title='test', duration=2.)
+        def update():
+            cast.media_controller.status.current_time += .3
+            cast.media_controller.status.adjusted_current_time += .3
+        cast.media_controller.update_status.side_effect = update
         def load(url, *_args, **_kw):
             cast.media_controller.status.content_id = url
             cast.media_controller.status.player_state = 'PLAYING'
@@ -95,14 +124,14 @@ class ConversionTests(unittest.TestCase):
         try:
             with patch('backend.pychromecast.get_chromecast_from_host', return_value=cast):
                 w.play({'source': str(self.video), 'device': 'test', 'audio': '2', 'subtitle': '3', 'mode': 'convert', 'quality': '720'})
-            out = Path(w.tmp.name) / 'video.mp4'
+            out = w.live.playlist
             data = probe(out)
             self.assertEqual([s['codec_name'] for s in data['streams']], ['h264', 'aac'])
             self.assertIn('Omarchy Cast subtitle test', (Path(w.tmp.name) / 'subtitles.vtt').read_text())
             call = cast.media_controller.play_media.call_args
             self.assertEqual(call.kwargs['stream_type'], 'BUFFERED')
             self.assertTrue(call.kwargs['subtitles'].endswith('.vtt'))
-            self.assertTrue(any(e == 'progress' for e, _ in events))
+            self.assertTrue(any(e == 'phase' and d['phase'] == 'playing' for e, d in events))
             # Verify the chosen 880 Hz audio track made it through the encode.
             import subprocess, array
             raw = subprocess.check_output(['ffmpeg', '-v', 'error', '-i', str(out), '-map', '0:a:0', '-ac', '1', '-ar', '8000', '-f', 'f32le', '-'])
@@ -134,7 +163,7 @@ class PickerTests(unittest.TestCase):
             out = io.StringIO()
             with patch('backend.subprocess.run', return_value=Mock(returncode=0, stdout='/tmp/a video.mkv\n')), contextlib.redirect_stdout(out):
                 w.command({'action': 'pick', 'kind': 'video'})
-            self.assertEqual(json.loads(out.getvalue()), {'event': 'picked', 'kind': 'video', 'path': '/tmp/a video.mkv'})
+            self.assertEqual([json.loads(line) for line in out.getvalue().splitlines()], [{'event': 'picked', 'kind': 'video', 'path': '/tmp/a video.mkv'}, {'event': 'pickerClosed'}])
         finally: w.tmp.cleanup()
 
 if __name__ == '__main__': unittest.main()
