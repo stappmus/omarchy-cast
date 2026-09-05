@@ -1,104 +1,79 @@
 # Omarchy Cast
 
-A native Omarchy shell plugin for sending videos to Chromecast and Google Cast TVs.
-Open **Omarchy Cast** from the app launcher. Its icon remains in the bar after the
-panel closes. Right-click the icon and choose **Exit** to stop casting, close the
-media server, clean up converted files, and remove the icon. Opening it again
-restores the icon. An enabled icon survives shell restarts; playback does not.
+A theme-native Chromecast video player for the Quickshell-based Omarchy desktop.
+Open **Omarchy Cast** from the app menu. Close the panel to keep casting.
+Right-click its bar icon and choose **Exit** to stop and remove the icon.
 
-## Features
+## Version 0.2
 
-- Drag-and-drop local videos, a native file picker, and direct HTTP(S) video links.
-- Receiver discovery plus a manual receiver IP override.
-- Embedded text subtitles and external SRT, VTT, ASS/SSA files, converted to WebVTT.
-- Subtitle language, size, and live CC toggle.
-- Audio-track selection for local files.
-- Auto, direct, and H.264/AAC compatibility modes; original, 1080p, or 720p conversion.
-- Play/pause, seek slider, ±30 seconds, starting offset, volume, mute, and stop.
-- Preparation progress and cancellation.
-- Shared Omarchy popup, control, font, spacing, border, and color tokens; responds to theme changes.
+- A focused video drop area, receiver selector, subtitles, and one Play action.
+- A Google TV Streamer compatibility profile based on Google's published limits.
+- Original video and audio are preserved when compatible with the selected output.
+- Live HLS conversion instead of preparing the entire movie first.
+- Unsupported audio becomes 320 kbps AAC stereo; optional 512 kbps AAC surround.
+- Supported H.264 is copied into HLS without video re-encoding. Supported HEVC uses fragmented MP4 HLS.
+- Required video conversion uses H.264 CRF 18, up to the device's resolution and frame-rate limits. No automatic quality ladder.
+- A small initial buffer, with encoding held roughly 12–24 seconds ahead; actual startup depends on keyframes and encoding speed.
+- Pause, seek, volume, mute, subtitles, and visible pending-command feedback.
+- Animated connecting, compatibility, and buffering states.
+- External SRT/VTT/ASS and embedded text subtitle selection, size, and language.
+
+Google TV Streamer is the primary target for this release. Other video Cast devices
+use a conservative standard profile; this is not a complete per-model database.
+The audio output defaults to stereo because the default receiver does not expose
+the attached TV/sound system's full capabilities. Select Surround 5.1 only for a
+compatible audio setup. HEVC/HDR preservation depends on source and profile;
+required HDR video conversion applies SDR tone mapping.
 
 ## Install
-
-Requires a recent **Quickshell-based Omarchy** with `qs.Ui.KeyboardPanel`,
-`omarchy plugin`, Python 3.10+, PyChromecast 14+, FFmpeg, and Zenity.
-The older Waybar-based Omarchy shell is not supported.
 
 ```bash
 omarchy pkg add python-pychromecast ffmpeg zenity
 git clone https://github.com/stappmus/omarchy-cast.git
 cd omarchy-cast
 ./install.sh
-./setup-network.sh  # If UFW is enabled
+./setup-network.sh # If UFW is enabled
 omarchy-cast
 ```
 
-The installer creates the plugin at `~/.config/omarchy/plugins/stappmus.cast`,
-a launcher at `~/.local/bin/omarchy-cast`, and an app-menu desktop entry.
-It does not edit packaged Omarchy files or replace your bar configuration.
-Re-run the installer after pulling updates. To uninstall, run `./uninstall.sh`
-and then `omarchy plugin remove stappmus.cast` to remove the plugin files.
+Requires the recent Quickshell Omarchy shell, Python 3.10+, PyChromecast 14+,
+and FFmpeg with HLS, libx264, AAC, and readrate_initial_burst support.
+HDR conversion additionally requires zscale and tonemap filters.
 
-## Using Cast
+The receiver must reach TCP 49786 on this computer. The network helper opens
+only that port from the current local subnet. Explicitly selected files and
+session-generated segments are served over local HTTP under random URLs;
+directories and arbitrary file paths are not exposed. Temporary segments live
+under `~/.cache/omarchy-cast/` and are removed on Stop or Exit. Abrupt termination
+can leave a session directory there.
 
-1. Drop a video on the card, or click it to browse. Use **Or paste a video link** for a URL.
-2. Select your TV under **Play on**. The first discovered TV is selected automatically.
-3. Choose subtitles if wanted, then press **Play on _TV name_**.
+## Use
 
-The player appears while casting. **Options** holds audio tracks, subtitle size,
-compatibility, resolution, starting time, and a manual TV address. Right-click
-the bar icon for **Exit**. Closing the panel keeps casting.
+Drop or select a video, select a TV, optionally select subtitles, and press
+**Play on your TV**. Audio tracks, sound output, quality limits, and a manual TV
+address are under **Options**. Changes apply when restarting the video.
+URLs must point to media, not web pages or DRM content. Image subtitles require
+an external text subtitle file. Closing the panel keeps playback running.
 
-## Playback notes
+Live conversion retains a rolling segment window. Seeking outside that window
+restarts conversion at the selected movie position with another short buffer.
+There is no silent automatic resolution reduction. If encoding cannot keep up,
+choose a lower quality explicitly. Playback errors do not prove that a codec is
+unsupported, and receiver status cannot confirm audible sound.
 
-Use a Chromecast on the same reachable local network. Discovery uses mDNS;
-with segmented networks, try the receiver IP. The receiver must be able to
-connect back to this computer's HTTP port (TCP 49786). The server
-binds to the local interface used to reach the receiver. Only explicitly chosen
-media and subtitle files are exposed, under random URLs, for the cast session;
-it does not serve directories. This is unencrypted local-network HTTP.
+Re-run install.sh after updating. Use uninstall.sh to remove the launcher and
+disable the plugin, then `omarchy plugin remove stappmus.cast` to remove files.
 
-**Auto** sends H.264/yuv420p MP4 files with AAC/MP3 audio directly and prepares
-other local formats as MP4. Compatible H.264 video is copied unchanged when
-only its container or audio needs conversion. Audio selection or resolution limits also trigger
-conversion in Auto. **Compatibility** always converts; **Direct** lets the
-receiver try the original file. Codec support varies by receiver generation.
-Conversion finishes before playback, allowing dependable seeking; large videos
-can take time and require temporary disk space in `~/.cache/omarchy-cast/`
-(or `$XDG_CACHE_HOME/omarchy-cast/`). Temporary media is deleted on
-Stop or Exit. Abrupt process termination or power loss can leave an
-`session-*` directory in `~/.cache/omarchy-cast/`.
+## Validation status
 
-Video URLs must point to playable media, not YouTube/web pages or DRM content.
-URLs are played directly without conversion or embedded-track inspection.
-Image subtitles (PGS/VobSub) are omitted because WebVTT requires text; use an
-external SRT/VTT instead. Subtitle appearance support varies by receiver.
-Changing track, subtitle-file, size, or conversion settings takes effect when
-you press **Play on your TV** again, or **Options → Apply & restart video**
-during playback. The CC button toggles the loaded subtitle track.
-Closing the panel leaves playback running; Exit stops playback owned by this
-plugin. If another app takes over the receiver, the plugin will not stop it.
+Version 0.1's prepared MP4 path was exercised on a Google TV Streamer.
+Version 0.2's Python syntax and plugin manifest were checked and the panel loaded.
+Live playback and the new compatibility policies have **not** been playback-tested;
+testing was deferred at the user's request. The automated suite is being updated
+for the new streaming architecture; do not interpret earlier conversion results
+as validation of live HLS.
 
-## Development and validation
-
-```bash
-python -m unittest discover -s tests -v
-omarchy plugin validate .
-python -m py_compile backend.py
-```
-
-The worker uses JSON lines over stdin/stdout, never shell-interpolated media
-paths. A single worker owns each mounted bar widget. Intended for one bar
-instance; avoid manually duplicating it across multiple bars.
-
-## Validation
-
-Automated coverage exercises real FFmpeg conversion and subtitle extraction,
-selects the second audio track and checks the resulting audio frequency,
-verifies HTTP seeking/HEAD/CORS, rejects unselected paths, and checks receiver
-ownership on Stop. The launcher, native panel, and Exit lifecycle were exercised
-on a Quickshell Omarchy desktop.
-
-Cast transport uses [PyChromecast](https://github.com/home-assistant-libs/pychromecast),
-including its [media/subtitle API](https://github.com/home-assistant-libs/pychromecast/blob/master/pychromecast/controllers/media.py).
-The plugin and installer are MIT licensed.
+Compatibility references: [Google Cast supported media](https://developers.google.com/cast/docs/media)
+and [FFmpeg HLS documentation](https://ffmpeg.org/ffmpeg-formats.html#hls-1).
+Transport uses [PyChromecast](https://github.com/home-assistant-libs/pychromecast).
+MIT licensed.

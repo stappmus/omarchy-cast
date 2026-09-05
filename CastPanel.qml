@@ -26,6 +26,23 @@ Panel {
     property var playback: ({connected: false, state: "IDLE", position: 0, duration: 0, volume: 0.5})
     property bool subtitlesEnabled: true
     property int progress: -1
+    property string phaseName: "idle"
+    property string phaseMessage: ""
+    property string profileDescription: ""
+    property string busyAction: ""
+    property int commandSequence: 0
+    property string pendingAction: ""
+    property int pendingId: 0
+    property string pendingState: ""
+    property real pendingPosition: -1
+    property real pendingVolume: -1
+    property var pendingMuted: null
+    readonly property bool controlPending: pendingAction !== ""
+    readonly property string displayedState: pendingState || playback.state || "IDLE"
+    readonly property real displayedPosition: pendingPosition >= 0 ? pendingPosition : (playback.position || 0)
+    readonly property real displayedVolume: pendingVolume >= 0 ? pendingVolume : (playback.volume === undefined ? 0.5 : playback.volume)
+    readonly property bool displayedMuted: pendingMuted !== null ? pendingMuted : !!playback.muted
+    readonly property bool transitioning: preparing || (playback.connected && playback.state === "BUFFERING")
     property string sourcePath: ""
     property real sourceDuration: 0
     property bool optionsExpanded: false
@@ -50,6 +67,7 @@ Panel {
     component Action: Button {
         focusable: true
         opacity: enabled ? 1 : 0.35
+        Behavior on opacity { NumberAnimation { duration: 160 } }
     }
     function chooseSource(path) {
         sourcePath = path
@@ -60,6 +78,23 @@ Panel {
 
     function send(command) {
         if (!ready) { message = "Cast worker is not running. Exit and reopen Omarchy Cast."; failed = true; return }
+        command.id = ++commandSequence
+        var controls = ["pause", "seek", "volume", "mute", "subtitles", "stop"]
+        if (controls.indexOf(command.action) >= 0) {
+            if (controlPending && command.action !== "stop") return
+            pendingAction = command.action
+            pendingId = command.id
+            if (command.action === "pause") {
+                command.paused = playback.state === "PLAYING"
+                pendingState = command.paused ? "PAUSED" : "PLAYING"
+            } else if (command.action === "seek") {
+                pendingPosition = Math.max(0, Math.min(playback.duration || 1e9, Number(command.value) + (command.relative ? (playback.position || 0) : 0)))
+            } else if (command.action === "volume") pendingVolume = command.value
+            else if (command.action === "mute") { command.muted = !playback.muted; pendingMuted = command.muted }
+            controlTimeout.interval = command.action === "seek" ? 60000 : 12000
+            controlTimeout.restart()
+        }
+        if (command.action === "pick") root.close()
         worker.write(JSON.stringify(command) + "\n")
     }
     function inspectSource() {
@@ -73,7 +108,7 @@ Panel {
         send({action: "cast", source: root.sourcePath, device: receiver.value, host: host.text,
               subtitle: subtitles.value, external: external.text, language: language.text,
               subtitleSize: subtitleSize.value, audio: audio.value, mode: mode.value,
-              quality: quality.value, start: Number(start.text) || 0})
+              quality: quality.value, sound: sound.value, start: Number(start.text) || 0})
     }
     function exitApp() {
         exiting = true
@@ -90,7 +125,14 @@ Panel {
         var e
         try { e = JSON.parse(data) } catch (_) { return }
         if (e.event === "ready") { ready = true; send({action: "scan"}) }
-        else if (e.event === "busy") { busy = e.busy; if (!busy) { progress = -1; preparing = false } }
+        else if (e.event === "busy") { busy = e.busy; busyAction = e.busy ? e.action : ""; if (!busy && e.action === "cast") { progress = -1; preparing = false } }
+        else if (e.event === "phase") {
+            phaseName = e.phase; phaseMessage = e.message
+            preparing = ["connecting", "compatibility", "subtitles", "buffering", "loading"].indexOf(e.phase) >= 0
+        } else if (e.event === "profile") profileDescription = e.description
+        else if (e.event === "pickerClosed") root.open()
+        else if (e.event === "commandResult" && e.id === pendingId) clearPending()
+
         else if (e.event === "devices") {
             devices = e.devices
             if (devices.length && !devices.some(function(d) { return d.value === receiver.value })) receiver.value = devices[0].value
@@ -107,7 +149,19 @@ Panel {
             else chooseSource(e.path)
         } else if (e.event === "status") playback = e
         else if (e.event === "progress") progress = e.percent
-        else if (e.event === "error" || e.event === "message") { message = e.message; failed = e.event === "error" }
+        else if (e.event === "error" || e.event === "message") { message = e.message; failed = e.event === "error"; if (failed) { preparing = false; phaseName = "idle"; clearPending() } }
+    }
+    function clearPending() {
+        pendingAction = ""; pendingState = ""; pendingPosition = -1; pendingVolume = -1; pendingMuted = null
+        controlTimeout.stop()
+    }
+    Timer {
+        id: controlTimeout
+        onTriggered: {
+            root.clearPending()
+            root.message = "The TV is taking longer to respond. You can try again."
+            root.failed = true
+        }
     }
     Process {
         id: worker
@@ -134,7 +188,7 @@ Panel {
         function options(): void { root.optionsExpanded = true; root.open() }
         function contextMenu(): void { root.contextMode = true; root.open() }
         function exit(): void { root.exitApp() }
-        function status(): string { return JSON.stringify({ready: root.ready, busy: root.busy, message: root.message, devices: root.devices, playback: root.playback, opened: root.opened}) }
+        function status(): string { return JSON.stringify({ready: root.ready, busy: root.busy, message: root.message, phase: root.phaseName, profile: root.profileDescription, pendingAction: root.pendingAction, devices: root.devices, playback: root.playback, opened: root.opened}) }
     }
     BarIconButton {
         id: button
@@ -161,6 +215,7 @@ Panel {
         focusTarget: panelFocus
         padding: Style.space(24)
         contentWidth: panel.fittedContentWidth(Style.space(root.contextMode ? 220 : 420))
+        Behavior on contentHeight { NumberAnimation { duration: 220; easing.type: Easing.InOutCubic } }
         contentHeight: panel.fittedContentHeight(root.contextMode ? contextColumn.implicitHeight : content.implicitHeight, Style.space(820))
         Item {
             id: panelFocus
@@ -270,7 +325,7 @@ Panel {
                             Layout.fillWidth: true
                             Caption { text: "PLAY ON"; font.pixelSize: Style.space(9); font.letterSpacing: Style.space(1) }
                             Item { Layout.fillWidth: true }
-                            Action { text: root.busy && !root.preparing ? "Searching…" : "Refresh"; fontSize: Style.font.caption; horizontalPadding: 0; verticalPadding: 0; enabled: !root.busy; onClicked: root.send({action: "scan"}) }
+                            Action { text: root.busyAction === "scan" ? "Searching…" : "Refresh"; fontSize: Style.font.caption; horizontalPadding: 0; verticalPadding: 0; enabled: !root.busy; onClicked: root.send({action: "scan"}) }
                         }
                         Dropdown {
                             id: receiver
@@ -299,20 +354,51 @@ Panel {
                     TextField { id: external; visible: false }
 
                     ColumnLayout {
-                        visible: root.preparing
+                        visible: root.transitioning
                         Layout.fillWidth: true
                         spacing: Style.space(10)
                         RowLayout {
                             Layout.fillWidth: true
-                            Caption { text: root.progress >= 0 ? "Preparing your video" : "Connecting to " + root.receiverName; Layout.fillWidth: true; elide: Text.ElideRight }
-                            Caption { text: root.progress >= 0 ? root.progress + "%" : "" }
+                            spacing: Style.space(12)
+                            Item {
+                                implicitWidth: Style.space(24)
+                                implicitHeight: Style.space(24)
+                                Text {
+                                    anchors.centerIn: parent
+                                    text: "󰔟"
+                                    color: Color.accent
+                                    font.family: Style.font.family
+                                    font.pixelSize: Style.space(22)
+                                    RotationAnimator on rotation { from: 0; to: 360; duration: 1600; loops: Animation.Infinite; running: root.transitioning && root.opened }
+                                }
+                            }
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: Style.space(5)
+                                Text { text: root.preparing ? root.phaseMessage : "Buffering…"; Layout.fillWidth: true; wrapMode: Text.Wrap; color: Color.foreground; font.family: Style.font.family; font.pixelSize: Style.font.body }
+                                Caption { text: root.profileDescription || "A moment for the best picture and sound."; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                            }
                         }
                         Rectangle {
-                            Layout.fillWidth: true; implicitHeight: Style.space(3); radius: height / 2
-                            color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.12)
-                            Rectangle { width: parent.width * Math.max(0.03, root.progress / 100); height: parent.height; radius: height / 2; color: Color.accent }
+                            id: bufferTrack
+                            Layout.fillWidth: true
+                            implicitHeight: Style.space(3)
+                            radius: height / 2
+                            clip: true
+                            color: Qt.rgba(Color.foreground.r, Color.foreground.g, Color.foreground.b, 0.10)
+                            Rectangle {
+                                width: parent.width * 0.28
+                                height: parent.height
+                                radius: height / 2
+                                color: Color.accent
+                                SequentialAnimation on x {
+                                    running: root.transitioning && root.opened
+                                    loops: Animation.Infinite
+                                    NumberAnimation { from: -bufferTrack.width * 0.28; to: bufferTrack.width; duration: 1400; easing.type: Easing.InOutSine }
+                                }
+                            }
                         }
-                        Action { text: "Cancel"; Layout.alignment: Qt.AlignHCenter; onClicked: root.send({action: "cancel"}) }
+                        Action { visible: root.preparing; text: "Cancel"; Layout.alignment: Qt.AlignHCenter; onClicked: root.send({action: "cancel"}) }
                     }
                     Action {
                         visible: !root.preparing && !root.playback.connected
@@ -336,24 +422,44 @@ Panel {
                         spacing: Style.space(12)
                         RowLayout {
                             Layout.fillWidth: true
-                            Caption { text: root.clock(root.playback.position) }
-                            PanelSlider { Layout.fillWidth: true; bar: root.bar; maximum: Math.max(1, root.playback.duration || 0); value: root.playback.position || 0; step: 1; enabled: !root.busy; onReleased: value => root.send({action: "seek", value: value}) }
+                            Caption { text: root.clock(root.displayedPosition) }
+                            PanelSlider { Layout.fillWidth: true; bar: root.bar; maximum: Math.max(1, root.playback.duration || 0); value: root.displayedPosition; step: 1; enabled: !root.busy && !root.controlPending; onReleased: value => root.send({action: "seek", value: value}) }
                             Caption { text: root.clock(root.playback.duration) }
                         }
                         RowLayout {
                             Layout.alignment: Qt.AlignHCenter
                             spacing: Style.space(24)
-                            enabled: !root.busy
+                            enabled: !root.busy && !root.controlPending
                             Action { text: "−30"; tooltipText: "Back 30 seconds"; onClicked: root.send({action: "seek", value: -30, relative: true}) }
-                            Action { iconText: root.playback.state === "PLAYING" ? "󰏤" : "󰐊"; iconSize: Style.space(28); tooltipText: root.playback.state === "PLAYING" ? "Pause" : "Play"; onClicked: root.send({action: "pause"}) }
+                            Action { iconText: root.displayedState === "PLAYING" ? "󰏤" : "󰐊"; iconSize: Style.space(28); tooltipText: root.displayedState === "PLAYING" ? "Pause" : "Play"; onClicked: root.send({action: "pause"}) }
                             Action { text: "+30"; tooltipText: "Forward 30 seconds"; onClicked: root.send({action: "seek", value: 30, relative: true}) }
                         }
                         RowLayout {
                             Layout.fillWidth: true
-                            enabled: !root.busy
-                            Action { iconText: root.playback.muted ? "󰝟" : "󰕾"; tooltipText: root.playback.muted ? "Unmute" : "Mute"; onClicked: root.send({action: "mute"}) }
-                            PanelSlider { Layout.fillWidth: true; bar: root.bar; value: root.playback.volume === undefined ? 0.5 : root.playback.volume; onReleased: value => root.send({action: "volume", value: value}) }
+                            enabled: !root.busy && !root.controlPending
+                            Action { iconText: root.displayedMuted ? "󰝟" : "󰕾"; tooltipText: root.displayedMuted ? "Unmute" : "Mute"; onClicked: root.send({action: "mute"}) }
+                            PanelSlider { Layout.fillWidth: true; bar: root.bar; value: root.displayedVolume; onReleased: value => root.send({action: "volume", value: value}) }
                             Action { text: "CC"; active: root.subtitlesEnabled; visible: root.loadedSubtitle !== "none"; tooltipText: "Toggle subtitles"; onClicked: { root.subtitlesEnabled = !root.subtitlesEnabled; root.send({action: "subtitles", enabled: root.subtitlesEnabled}) } }
+                        }
+                        RowLayout {
+                            Layout.alignment: Qt.AlignHCenter
+                            visible: root.controlPending
+                            Repeater {
+                                model: 3
+                                Rectangle {
+                                    required property int index
+                                    width: Style.space(4); height: width; radius: width / 2; color: Color.accent
+                                    SequentialAnimation on opacity {
+                                        running: root.controlPending && root.opened
+                                        loops: Animation.Infinite
+                                        PauseAnimation { duration: index * 100 }
+                                        NumberAnimation { to: 0.25; duration: 260 }
+                                        NumberAnimation { to: 1; duration: 260 }
+                                        PauseAnimation { duration: (2 - index) * 100 }
+                                    }
+                                }
+                            }
+                            Caption { text: root.pendingAction === "seek" ? "Seeking…" : "Updating TV…" }
                         }
                         Action { text: "Stop casting"; fontSize: Style.font.caption; Layout.alignment: Qt.AlignHCenter; enabled: !root.busy; onClicked: root.send({action: "stop"}) }
                     }
@@ -381,8 +487,10 @@ Panel {
                             }
                         }
                         Dropdown { id: mode; Layout.fillWidth: true; label: "Compatibility"; value: "auto"; options: [{value: "auto", label: "Automatic"}, {value: "direct", label: "Play original file"}, {value: "convert", label: "Convert for this TV"}]; enabled: !root.busy }
-                        Caption { visible: mode.value !== "direct"; text: "If needed, your video is prepared before playback. Large files can take a few minutes."; Layout.fillWidth: true; wrapMode: Text.Wrap }
-                        Dropdown { id: quality; Layout.fillWidth: true; label: "Video quality"; value: "original"; options: [{value: "original", label: "Original resolution"}, {value: "1080", label: "Up to 1080p"}, {value: "720", label: "Up to 720p"}]; enabled: !root.busy && mode.value !== "direct" }
+                        Caption { visible: mode.value !== "direct"; text: "Compatible video stays unchanged. When needed, conversion runs live with a small buffer."; Layout.fillWidth: true; wrapMode: Text.Wrap }
+                        Dropdown { id: quality; Layout.fillWidth: true; label: "Video quality"; value: "original"; options: [{value: "original", label: "Best for this TV"}, {value: "2160", label: "Up to 4K"}, {value: "1080", label: "Up to 1080p"}, {value: "720", label: "Up to 720p"}]; enabled: !root.busy && mode.value !== "direct" }
+                        Dropdown { id: sound; Layout.fillWidth: true; label: "Sound"; value: "stereo"; options: [{value: "stereo", label: "High-quality stereo"}, {value: "surround", label: "Surround 5.1"}]; enabled: !root.busy }
+                        Caption { text: root.profileDescription; visible: text !== ""; Layout.fillWidth: true; wrapMode: Text.Wrap }
                         TextField { id: start; Layout.fillWidth: true; placeholderText: "Start at (seconds)"; validator: DoubleValidator { bottom: 0 } enabled: !root.busy }
                         TextField { id: host; Layout.fillWidth: true; placeholderText: "TV IP address (optional)"; enabled: !root.busy }
                         Caption { visible: host.text.trim() !== ""; text: "Using this address instead of the selected TV."; Layout.fillWidth: true; wrapMode: Text.Wrap }

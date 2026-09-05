@@ -10,6 +10,7 @@ from pathlib import Path
 import queue
 import re
 import signal
+import shutil
 import socket
 import subprocess
 import sys
@@ -21,6 +22,8 @@ from urllib.parse import urlsplit
 import pychromecast
 from pychromecast.discovery import CastBrowser, SimpleCastListener, stop_discovery
 from zeroconf import Zeroconf
+from compatibility import choose_plan
+from streaming import LiveStream, PlaybackEvidence, shift_vtt
 
 
 def probe(path):
@@ -50,6 +53,8 @@ class MediaServer(http.server.ThreadingHTTPServer):
     daemon_threads = True
     def __init__(self, address):
         self.files = {}
+        self.mounts = {}
+        self.requests = {}
         super().__init__(address, Handler)
         threading.Thread(target=self.serve_forever, daemon=True).start()
 
@@ -58,6 +63,22 @@ class MediaServer(http.server.ThreadingHTTPServer):
         self.files[key] = (Path(path), mime or mimetypes.guess_type(path)[0] or 'video/mp4')
         host, port = self.server_address
         return f'http://{host}:{port}{key}'
+
+    def mount(self, folder):
+        key = '/' + uuid.uuid4().hex
+        self.mounts[key] = Path(folder)
+        host, port = self.server_address
+        return f'http://{host}:{port}{key}/index.m3u8'
+
+    def resolve(self, route):
+        if route in self.files:
+            return self.files[route]
+        prefix, _, name = route.rpartition('/')
+        folder = self.mounts.get(prefix)
+        if folder and re.fullmatch(r'(?:index\.m3u8|init\.mp4|segment\d+\.(?:ts|m4s))', name):
+            mime = {'m3u8': 'application/vnd.apple.mpegurl', 'ts': 'video/mp2t', 'm4s': 'video/iso.segment', 'mp4': 'video/mp4'}[name.rsplit('.', 1)[1]]
+            return folder / name, mime
+        return None
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
@@ -78,7 +99,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.serve(True)
 
     def serve(self, body):
-        item = self.server.files.get(urlsplit(self.path).path)
+        route = urlsplit(self.path).path
+        item = self.server.resolve(route)
         if not item:
             self.send_error(404)
             return
@@ -86,6 +108,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         try:
             with path.open('rb') as stream:
                 size = os.fstat(stream.fileno()).st_size
+                if body:
+                    self.server.requests[route] = self.server.requests.get(route, 0) + 1
                 try:
                     start, end, partial = byte_range(self.headers.get('Range'), size)
                 except ValueError:
@@ -95,6 +119,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return
                 self.send_response(206 if partial else 200)
                 self.send_header('Content-Type', mime)
+                self.send_header('Cache-Control', 'no-cache')
                 self.send_header('Content-Length', str(max(0, end - start + 1)))
                 self.send_header('Accept-Ranges', 'bytes')
                 self.send_header('Access-Control-Allow-Origin', '*')
@@ -111,6 +136,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                             break
                         self.wfile.write(data)
                         remaining -= len(data)
+        except FileNotFoundError:
+            self.send_error(404)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except OSError:
@@ -132,6 +159,39 @@ class Worker:
         cache.mkdir(mode=0o700, parents=True, exist_ok=True)
         self.tmp = tempfile.TemporaryDirectory(prefix='session-', dir=cache)
         self.process = None
+        self.live = None
+        self.offset = 0.
+        self.duration = 0.
+        self.plan = None
+        self.request = {}
+        self.subtitle_text = ''
+        self.load_error = None
+        self.phase_name = 'idle'
+
+    def new_media_status(self, status):
+        pass
+
+    def load_media_failed(self, queue_item_id, error_code):
+        self.load_error = f'The TV rejected playback (code {error_code})'
+
+    def phase(self, name, message):
+        self.phase_name = name
+        self.emit('phase', phase=name, message=message)
+
+    def snapshot(self):
+        if not self.cast:
+            return dict(state='IDLE', connected=False, position=0, duration=0)
+        s = self.cast.media_controller.status
+        own = bool(self.url and s.content_id == self.url)
+        start, end = self.live.window if self.live else (0, self.duration)
+        position = self.offset + float(s.adjusted_current_time or 0) if own else 0
+        return dict(state=s.player_state if own else 'TAKEN_OVER', title=s.title or '',
+                    position=min(position, self.duration) if self.duration else position,
+                    duration=self.duration or s.duration or 0, volume=self.cast.status.volume_level,
+                    muted=self.cast.status.volume_muted, connected=own,
+                    device=self.cast.cast_info.friendly_name, live=bool(self.live),
+                    bufferedStart=self.offset + start, bufferedEnd=self.offset + end,
+                    profile=self.plan.description if self.plan else '', phase=self.phase_name)
 
     def emit(self, event, **values):
         with self.lock:
@@ -186,6 +246,16 @@ class Worker:
         supported = {str(s['index']) for s in streams if s.get('codec_name') in ('subrip', 'ass', 'ssa', 'webvtt', 'mov_text', 'text')}
         self.emit('tracks', audio=options('audio'), subtitles=[s for s in subs if s['value'] in supported], duration=float(data.get('format', {}).get('duration', 0)), omittedSubtitles=len(subs) - len(supported))
 
+    def release_live(self):
+        if self.live:
+            stream = self.live
+            self.live = None
+            if self.server:
+                for key, folder in list(self.server.mounts.items()):
+                    if folder == stream.folder:
+                        del self.server.mounts[key]
+            stream.close()
+
     def stop(self):
         if self.cast:
             with contextlib.suppress(Exception):
@@ -194,23 +264,24 @@ class Worker:
             with contextlib.suppress(Exception):
                 self.cast.disconnect(timeout=3)
             self.cast = None
+        self.release_live()
         if self.server:
             self.server.shutdown()
             self.server.server_close()
             self.server = None
         self.url = ''
+        self.offset = 0
+        self.phase_name = 'idle'
         for path in Path(self.tmp.name).iterdir():
-            path.unlink(missing_ok=True)
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink(missing_ok=True)
 
-    def play(self, request):
-        source = request.get('source', '').strip()
-        remote = urlsplit(source).scheme in ('http', 'https')
-        if not remote and not Path(source).is_file():
-            raise ValueError('Select an existing video file or an HTTP(S) video URL')
-        self.stop()
+    def connect(self, request):
+        self.phase('connecting', 'Connecting to your TV…')
         host = request.get('host', '').strip()
         if host:
-            # Discovery with a known host also obtains the receiver UUID and model.
             casts, browser = pychromecast.get_chromecasts(known_hosts=[host], timeout=5, tries=1)
             try:
                 chosen = next((c for c in casts if c.cast_info.host == socket.gethostbyname(host)), None)
@@ -225,69 +296,116 @@ class Worker:
         else:
             info = self.devices.get(request.get('device'))
             if not info:
-                raise ValueError('Scan and select a Chromecast, or enter its IP address')
+                raise ValueError('Select your TV, or enter its IP address in Options')
             self.cast = pychromecast.get_chromecast_from_host((info.host, info.port, info.uuid, info.model_name, info.friendly_name), tries=2, timeout=5)
         self.cast.wait(timeout=10)
+        self.cast.media_controller.register_status_listener(self)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
             route.connect((self.cast.cast_info.host, self.cast.cast_info.port))
             local_ip = route.getsockname()[0]
-        self.server = MediaServer((local_ip, int(os.environ.get("OMARCHY_CAST_PORT", "49786"))))
-        subs_url = None
+        self.server = MediaServer((local_ip, int(os.environ.get('OMARCHY_CAST_PORT', '49786'))))
+
+    def play(self, request):
+        source = request.get('source', '').strip()
+        remote = urlsplit(source).scheme in ('http', 'https')
+        if not remote and not Path(source).is_file():
+            raise ValueError('Select an existing video file or an HTTP(S) video URL')
+        self.stop()
+        self.request = dict(request, source=source)
+        self.connect(request)
+        self.phase('compatibility', 'Matching picture and sound to your TV…')
+        metadata = probe(source)
+        self.duration = float(metadata.get('format', {}).get('duration', 0) or 0)
+        self.plan = choose_plan(self.cast.cast_info.model_name, source, metadata, request)
+        self.emit('profile', **self.plan.json())
+        self.subtitle_text = ''
         subtitle = request.get('subtitle', 'none')
-        external = request.get('external', '').strip()
         if subtitle != 'none':
+            self.phase('subtitles', 'Preparing subtitles…')
             out = Path(self.tmp.name) / 'subtitles.vtt'
+            external = request.get('external', '').strip()
             if subtitle == 'external':
                 if not Path(external).is_file():
                     raise ValueError('Choose a subtitle file')
                 args = ['-i', external, '-map', '0:0', '-c:s', 'webvtt', str(out)]
             elif remote:
-                raise ValueError('Embedded subtitles require a local video')
+                raise ValueError('Use an external subtitle file for video links')
             else:
                 args = ['-i', source, '-map', f'0:{int(subtitle)}', '-c:s', 'webvtt', str(out)]
             self.run_ffmpeg(args)
-            subs_url = self.server.share(out, 'text/vtt; charset=utf-8')
-        media_source = source
-        if not remote:
-            data = probe(source)
-            streams = data.get('streams', [])
-            video = next((s for s in streams if s['codec_type'] == 'video'), {})
-            audio = next((s for s in streams if s['codec_type'] == 'audio'), {})
-            selected = request.get('audio', 'default')
-            mode = request.get('mode', 'auto')
-            compatible = Path(source).suffix.lower() in ('.mp4', '.m4v') and video.get('codec_name') == 'h264' and video.get('pix_fmt') == 'yuv420p' and audio.get('codec_name', 'aac') in ('aac', 'mp3')
-            convert = mode == 'convert' or (mode == 'auto' and (not compatible or selected != 'default' or request.get('quality', 'original') != 'original'))
-            if mode == 'direct' and selected != 'default':
-                raise ValueError('Use Auto or Compatibility mode to change audio tracks')
-            if convert:
-                self.emit('message', message='Preparing a seekable MP4. This may take a few minutes…')
-                out = Path(self.tmp.name) / 'video.mp4'
-                copy_video = mode == 'auto' and video.get('codec_name') == 'h264' and video.get('pix_fmt') == 'yuv420p' and request.get('quality', 'original') == 'original'
-                video_args = ['-c:v', 'copy'] if copy_video else ['-c:v', 'libx264', '-preset', 'veryfast', '-crf', '21', '-pix_fmt', 'yuv420p']
-                args = ['-i', source, '-map', '0:v:0', '-map', '0:a:0?' if selected == 'default' else f'0:{int(selected)}', '-sn', *video_args, '-c:a', 'aac', '-ac', '2', '-b:a', '192k', '-movflags', '+faststart']
-                quality = request.get('quality', 'original')
-                if quality in ('720', '1080'):
-                    args += ['-vf', rf"scale=-2:trunc(min(ih\,{quality})/2)*2"]
-                args += [str(out)]
-                self.run_ffmpeg(args, float(data.get('format', {}).get('duration', 0)))
-                media_source = str(out)
-            self.url = self.server.share(media_source)
+            self.subtitle_text = out.read_text()
+        self.start_media(max(0, float(request.get('start', 0))))
+
+    def live_playhead(self):
+        if self.cast and self.url and self.cast.media_controller.status.content_id == self.url:
+            return float(self.cast.media_controller.status.adjusted_current_time or 0)
+        return 0
+
+    def start_media(self, offset, paused=False):
+        self.release_live()
+        self.offset = offset if self.plan.transport == 'hls' else 0
+        self.load_error = None
+        source = self.request['source']
+        subtitles_url = None
+        if self.subtitle_text:
+            path = Path(self.tmp.name) / ('subtitle-' + uuid.uuid4().hex + '.vtt')
+            path.write_text(shift_vtt(self.subtitle_text, self.offset))
+            subtitles_url = self.server.share(path, 'text/vtt; charset=utf-8')
+        if self.plan.transport == 'hls':
+            self.phase('buffering', 'Building a small playback buffer…')
+            self.url = ''
+            self.live = LiveStream(Path(self.tmp.name) / uuid.uuid4().hex, source, self.plan,
+                                   self.request.get('audio', 'default'), offset, self.live_playhead)
+            self.live.wait_ready(self.cancel)
+            self.url = self.server.mount(self.live.folder)
+            mime = 'application/vnd.apple.mpegurl'
         else:
-            self.url = source
+            self.url = source if urlsplit(source).scheme in ('http', 'https') else self.server.share(source)
+            mime = mimetypes.guess_type(urlsplit(source).path)[0] or 'video/mp4'
         if self.cancel.is_set():
-            raise ValueError('Preparation cancelled')
-        title = Path(urlsplit(source).path).name or 'Video'
-        self.cast.media_controller.play_media(self.url, mimetypes.guess_type(urlsplit(media_source).path)[0] or 'video/mp4', title=title, stream_type='BUFFERED', current_time=max(0, float(request.get('start', 0))), subtitles=subs_url, subtitles_lang=request.get('language', 'en') or 'en', media_info={'textTrackStyle': {'fontScale': float(request.get('subtitleSize', 1)), 'backgroundColor': '#00000080', 'foregroundColor': '#FFFFFFFF', 'edgeType': 'OUTLINE'}})
-        self.cast.media_controller.block_until_active(timeout=15)
-        deadline = time.monotonic() + 20
+            raise InterruptedError('Cancelled')
+        self.phase('loading', 'Starting on ' + self.cast.cast_info.friendly_name + '…')
+        info = {'textTrackStyle': {'fontScale': float(self.request.get('subtitleSize', 1)), 'backgroundColor': '#00000080', 'foregroundColor': '#FFFFFFFF', 'edgeType': 'OUTLINE'}}
+        if self.plan.fmp4 and self.live:
+            info.update(hlsVideoSegmentFormat='FMP4', hlsSegmentFormat='FMP4')
+        if self.duration:
+            info['duration'] = max(0, self.duration - self.offset)
+        def loaded(success, response):
+            if not success:
+                self.load_error = 'The TV could not load this stream'
+        mc = self.cast.media_controller
+        mc.play_media(self.url, mime, title=Path(urlsplit(source).path).name or 'Video',
+                      stream_type='BUFFERED', current_time=0 if self.live else offset,
+                      autoplay=not paused, subtitles=subtitles_url,
+                      subtitles_lang=self.request.get('language', 'en') or 'en',
+                      media_info=info, callback_function=loaded)
+        evidence = PlaybackEvidence()
+        deadline = time.monotonic() + 25
+        next_poll = 0
         while time.monotonic() < deadline:
-            status = self.cast.media_controller.status
-            if status.content_id == self.url and status.player_state in ('PLAYING', 'PAUSED', 'BUFFERING'):
-                self.emit('message', message='Casting to ' + self.cast.cast_info.friendly_name)
+            if self.cancel.wait(.15):
+                raise InterruptedError('Cancelled')
+            if self.load_error:
+                raise ValueError(self.load_error + '. Try Convert for this TV in Options.')
+            if self.live and self.live.process.poll() not in (None, 0):
+                raise ValueError('Live conversion failed: ' + '; '.join(self.live.errors)[-300:])
+            if time.monotonic() >= next_poll:
+                mc.update_status()
+                next_poll = time.monotonic() + .75
+            status = mc.status
+            if status.content_id != self.url:
+                continue
+            result = evidence.observe(status.player_state, status.current_time, status.idle_reason)
+            if result == 'failed':
+                raise ValueError('The TV rejected playback. Try Convert for this TV in Options.')
+            if result == 'playing' or (paused and status.player_state == 'PAUSED'):
+                self.phase('playing', self.plan.description)
+                self.emit('status', **self.snapshot())
                 return
-            if self.cancel.wait(0.25):
-                raise ValueError('Cast cancelled')
-        raise ValueError('Receiver did not start playback. Try Compatibility mode and check that the TV can reach this computer on the local network.')
+        route = urlsplit(self.url).path
+        if not self.server.requests.get(route) and urlsplit(self.url).hostname == self.server.server_address[0]:
+            raise ValueError('The TV cannot reach this computer. Allow TCP 49786 from your local network.')
+        raise ValueError('The TV did not confirm playback. Try Convert for this TV in Options; quality will not be reduced automatically.')
 
     def command(self, r):
         action = r.get('action')
@@ -308,21 +426,33 @@ class Worker:
             result = subprocess.run(['zenity', '--file-selection', '--title=' + ('Choose subtitles' if r.get('kind') == 'subtitle' else 'Choose video')], capture_output=True, text=True)
             if result.returncode == 0:
                 self.emit('picked', kind=r.get('kind'), path=result.stdout.strip())
+            self.emit('pickerClosed')
         elif self.cast:
             mc = self.cast.media_controller
             if mc.status.content_id != self.url:
                 raise ValueError('Another app has taken over this Chromecast')
             if action == 'pause':
-                mc.pause() if mc.status.player_is_playing else mc.play()
+                pause = r.get('paused', mc.status.player_is_playing)
+                mc.pause() if pause else mc.play()
             elif action == 'seek':
                 target = float(r.get('value', 0))
                 if r.get('relative'):
-                    target += mc.status.adjusted_current_time
-                mc.seek(max(0, min(target, mc.status.duration or target)))
+                    target += self.offset + mc.status.adjusted_current_time
+                target = max(0, min(target, max(0, self.duration - 1) if self.duration else target))
+                if self.live:
+                    start, end = self.live.window
+                    if not (self.offset + start + 1 <= target <= self.offset + end - 2):
+                        was_paused = mc.status.player_is_paused
+                        mc.stop(timeout=3)
+                        self.start_media(target, paused=was_paused)
+                    else:
+                        mc.seek(target - self.offset)
+                else:
+                    mc.seek(target)
             elif action == 'volume':
                 self.cast.set_volume(max(0, min(1, float(r['value']))))
             elif action == 'mute':
-                self.cast.set_volume_muted(not self.cast.status.volume_muted)
+                self.cast.set_volume_muted(r.get('muted', not self.cast.status.volume_muted))
             elif action == 'subtitles':
                 mc.enable_subtitle(1) if r.get('enabled') else mc.disable_subtitle()
         else:
@@ -351,26 +481,35 @@ class Worker:
     def run(self):
         threading.Thread(target=self.input, daemon=True).start()
         self.emit('ready')
+        next_status = 0
         try:
             while not self.quit.is_set():
+                if time.monotonic() >= next_status:
+                    self.emit('status', **self.snapshot())
+                    next_status = time.monotonic() + .5
+                    if self.live and self.live.process.poll() not in (None, 0):
+                        self.emit('error', message='Live encoder stopped: ' + '; '.join(self.live.errors)[-300:])
+                        self.stop()
                 try:
-                    r = self.commands.get(timeout=1)
+                    r = self.commands.get(timeout=.2)
                 except queue.Empty:
-                    if self.cast:
-                        s = self.cast.media_controller.status
-                        own = s.content_id == self.url
-                        self.emit('status', state=s.player_state if own else 'TAKEN_OVER', title=s.title or '', position=s.adjusted_current_time, duration=s.duration or 0, volume=self.cast.status.volume_level, muted=self.cast.status.volume_muted, connected=own, device=self.cast.cast_info.friendly_name)
                     continue
                 self.cancel.clear()
-                self.emit('busy', busy=True)
+                busy_action = r.get('action') in ('scan', 'inspect', 'cast', 'pick')
+                if busy_action:
+                    self.emit('busy', busy=True, action=r.get('action'))
+                success = True
                 try:
                     self.command(r)
                 except Exception as error:
+                    success = False
+                    self.phase_name = 'idle'
                     self.emit('error', message=str(error))
                 finally:
-                    self.emit('busy', busy=False)
-                    if not self.cast:
-                        self.emit('status', state='IDLE', connected=False, position=0, duration=0)
+                    if busy_action:
+                        self.emit('busy', busy=False, action=r.get('action'))
+                    self.emit('status', **self.snapshot())
+                    self.emit('commandResult', id=r.get('id'), action=r.get('action'), ok=success)
         finally:
             self.stop()
             self.tmp.cleanup()
