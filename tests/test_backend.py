@@ -69,6 +69,41 @@ class OwnershipTests(unittest.TestCase):
         w.tmp.cleanup()
 
 
+class ReceiverRoutingTests(unittest.TestCase):
+    def test_load_launches_our_receiver_when_plex_exposes_media_namespace(self):
+        from pychromecast.controllers.media import MediaController
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        w=Worker(); w.emit=Mock()
+        info=SimpleNamespace(host='127.0.0.1',port=8009,uuid='test',model_name='Test',friendly_name='Test')
+        w.devices['test']=info
+        cast=Mock(); cast.cast_info=info; cast.status.app_id='AndroidNativeApp'
+        mc=MediaController(); cast.media_controller=mc
+        mc._socket_client=Mock()
+        mc._socket_client.app_namespaces=[mc.namespace]
+        mc._socket_client.receiver_controller.app_id='AndroidNativeApp'
+        mc.launch=Mock(); mc.send_message_nocheck=Mock()
+        try:
+            with patch('backend.pychromecast.get_chromecast_from_host',return_value=cast), patch('backend.MediaServer',return_value=Mock()):
+                w.connect({'device':'test'})
+            mc.play_media('http://localhost/movie.mp4','video/mp4')
+            mc.launch.assert_called_once()
+            mc.send_message_nocheck.assert_not_called()
+        finally: w.stop(); w.tmp.cleanup()
+
+    def test_timeout_does_not_blame_network_before_load_is_accepted(self):
+        w=Worker(); w.cast=Mock(); w.url='http://127.0.0.1:49786/video'
+        w.server=Mock(); w.server.requests={}; w.server.server_address=('127.0.0.1',49786)
+        try:
+            w.cast.status.app_id='AndroidNativeApp'
+            self.assertNotIn('firewall',w.load_timeout_message('/video'))
+            w.cast.status.app_id='CC1AD845'; w.cast.media_controller.status.content_id=None
+            self.assertNotIn('firewall',w.load_timeout_message('/video'))
+            w.cast.media_controller.status.content_id=w.url
+            self.assertIn('firewall',w.load_timeout_message('/video'))
+        finally: w.stop(); w.tmp.cleanup()
+
+
 class AudioAdjustmentTests(unittest.TestCase):
     def test_adjustment_preserves_position_pause_and_tracks(self):
         from types import SimpleNamespace

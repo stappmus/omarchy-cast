@@ -329,6 +329,9 @@ class Worker:
         if self.cast.status.app_id == 'CC1AD845':
             self.phase('connecting', 'Refreshing the TV player…')
             self.cast.quit_app(timeout=5)
+        # Plex and other native apps expose the media namespace too. Require
+        # Default Media Receiver before LOAD instead of sending our URL to them.
+        self.cast.media_controller.app_must_match = True
         self.cast.media_controller.register_status_listener(self)
         with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as route:
             route.connect((self.cast.cast_info.host, self.cast.cast_info.port))
@@ -461,11 +464,19 @@ class Worker:
                                     httpRequests=sum(self.server.requests.values()),
                                     requestedFiles=[Path(path).name for path in self.server.requests],
                                     buffer=self.live.window if self.live else None,
-                                    encoderPaused=self.live.suspended if self.live else False)
+                                    encoderPaused=self.live.suspended if self.live else False,
+                                    receiverApp=self.cast.status.app_id, receiverName=self.cast.status.display_name)
         self.emit('diagnostic', **self.last_diagnostic)
+        raise ValueError(self.load_timeout_message(route))
+
+    def load_timeout_message(self, route):
+        if self.cast.status.app_id != 'CC1AD845':
+            return 'The TV did not switch to the Cast player. Press Play to try again, or return the TV to its home screen first.'
+        if self.cast.media_controller.status.content_id != self.url:
+            return 'The Cast player did not accept the video request. Press Play to try again.'
         if not self.server.requests.get(route) and urlsplit(self.url).hostname == self.server.server_address[0]:
-            raise ValueError('The TV cannot reach this computer. Allow TCP 49786 from your local network.')
-        raise ValueError(self.playback_error('The TV did not confirm playback'))
+            return 'The TV selected the video but has not requested it. Check the local network and whether TCP 49786 is allowed through the computer firewall.'
+        return self.playback_error('The TV did not confirm playback')
 
     def playback_error(self, message):
         if self.plan and self.plan.transport == 'hls' and not self.plan.copy_video:

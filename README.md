@@ -88,7 +88,7 @@ disable the plugin, then `omarchy plugin remove stappmus.cast` to remove files.
 ## Validation status
 
 Version 0.1's prepared MP4 path was exercised on a Google TV Streamer.
-Version 0.3 passes 33 local regression tests and was tested on Stue for original
+Version 0.3 passes 35 local regression tests and was tested on Stue for original
 playback, remuxing, live conversion, HEVC HLS, pause/resume, seeking and audio
 adjustment. See [VALIDATION.md](VALIDATION.md) for the test scope and limits.
 

@@ -4,7 +4,7 @@
 
 `python -m unittest discover -s tests -v`
 
-33 tests cover HTTP ranges/CORS and selected-file access, device and codec limits,
+35 tests cover HTTP ranges/CORS and selected-file access, device and codec limits,
 manual model selection, default/explicit audio tracks, cover-art exclusion,
 subtitle conversion and seek retiming, real HLS encoding and audio selection,
 receiver progress evidence, startup after a short encoder finishes, +/-1 second
@@ -72,3 +72,17 @@ commands wake the worker immediately.
 Removed 5.06 GiB of abandoned session cache on the development machine after
 confirming that its Cast workers and encoders had exited. No source videos were
 removed. Picture quality, codec policies, and buffer thresholds are unchanged.
+
+## Receiver selection fix — 0.3.2
+
+The TV reported AndroidNativeApp / Plex over Cast while the user saw its home
+screen. PyChromecast's default media controller accepts any app exposing the
+media namespace, so it could send LOAD to that stale native-app session instead
+of launching Default Media Receiver. Require an app-ID match before sending.
+
+Two regressions cover namespace-sharing receiver routing and timeout messages.
+A silent HLS clip on Stue then reached Default Media Receiver (CC1AD845), reported
+PLAYING with progressing timestamps, and made eight HTTP requests. The test was
+stopped afterward. No firewall rule was changed. Receiver app identity is now
+included in timeout diagnostics, and a missing LOAD acceptance is no longer
+reported as proof of a firewall problem.
